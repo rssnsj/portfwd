@@ -1,0 +1,14 @@
+Design NAT machanism of TCP layer to SOCKS protocol transforming.
+Under development.
+Project home: https://socksnat.googlecode.com/
+
+Roadmap:
+
+This project includes a kernel module and a user-space daemon.
+
+1. Kernel module 'ipt_SOCKSDNAT': Forward TCP/UDP connections to a user-space program (behavior same as 'DNAT'). Meanwhile save the target IP/port in kernel with 'src_port(assigned)/dst_ip-dst_port' in accordance, so that the user-space program can retrieve the target address by 'ioctl'. The redirecting rules can be simply issued by these Netfilter rules:
+  iptables -t nat -A PREROUTING -s 192.168.1.0/24 -p tcp -j SOCKSDNAT --to 127.0.0.1:7070 
+  iptables -t nat -A PREROUTING -s 192.168.1.0/24 -p udp -j SOCKSDNAT --to 127.0.0.1:7070 
+
+2. User-space program 'socksnatd' listens a TCP port and a UDP port on 127.0.0.1 (e.g., 7070 as the above). When it receives a new TCP connection, first it gets the requsted target IP/port by 'ioctl(/proc/socksnat/tcp, client_port)', and then connects to the real server through SOCKS protocol.
+
