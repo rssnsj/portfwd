@@ -1,16 +1,29 @@
-all: socksnatd
-	make -C netfilter
+all: socksnatd socksnat.ko
+
+# Driver module
+
+KERNSRC ?= /lib/modules/$(shell uname -r)/build
+CC      ?= gcc
+
+obj-m := socksnat.o
+
+socksnat.ko: socksnat.c
+	make -C $(KERNSRC) M=$(shell pwd) modules
 
 socksnatd: socksnatd.o
 	gcc -o $@ $^ -lpthread
 
-clean:
-	rm -f socksnatd *.o
-
-install: all
-	make install -C netfilter
-	cp -vf socksnatd /usr/local/bin/
-
 %.o: %.c
 	gcc -c $(CFLAGS) -o $@ $<
+
+install: all
+	cp -vf socksnatd /usr/local/bin/
+	mkdir -p /lib/modules/$(shell uname -r)/kernel/misc
+	cp -vf socksnat.ko /lib/modules/$(shell uname -r)/kernel/misc/
+	depmod
+
+clean:
+	find . \( -name '.tmp_versions' -o -name '*.o' -o -name '*.ko' -o -name '.*.cmd' \
+	  -o -name '.*.d' -o -name '*.mod.c' -o -name '*.symvers' -o -name '*~' \) -print | xargs rm -fr;
+	rm -f socksnatd *.o
 
