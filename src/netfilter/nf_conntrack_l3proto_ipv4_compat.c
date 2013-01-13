@@ -408,7 +408,6 @@ static int ct_query_release(struct inode *inode, struct file *file)
 static int ct_query_ioctl(struct inode *inode, struct file *file,
 						  unsigned int cmd, unsigned long arg)
 {
-	
 	switch (cmd) {
 	case CT_GET_ORIG_BY_DNATED: {
 			struct ct_query_req req;

@@ -64,7 +64,8 @@ obj-m += nf_conntrack_ipv4.o
 
 # obj-m += ip_queue.o
 
-KERNSRC ?= /lib/modules/$(shell uname -r)/build
+KERNSRC = /lib/modules/$(shell uname -r)/build
+CT_IPV4_MOD_PATH = /lib/modules/$(shell uname -r)/kernel/net/ipv4/netfilter/nf_conntrack_ipv4.ko
 
 all:
 	make -C $(KERNSRC) M=$(shell pwd) modules
@@ -73,13 +74,20 @@ clean:
 	find . \( -name '.tmp_versions' -o -name '*.o' -o -name '*.ko' -o -name '.*.cmd' \
 	  -o -name '.*.d' -o -name '*.mod.c' -o -name '*.symvers' -o -name '*~' \) -print | xargs rm -fr;
 
-up: all
+install: all
+	dmesg -c
+	iptables -F
 	iptables -t nat -F
 	- rmmod ipt_MASQUERADE
 	- rmmod iptable_nat
 	- rmmod nf_nat
 	- rmmod nf_conntrack_ipv4
 	insmod nf_conntrack_ipv4.ko
+	modprobe nf_nat
+	modprobe iptable_nat
+	modprobe ipt_MASQUERADE
 	iptables-restore < /etc/iptables.rules
+	[ -f $(CT_IPV4_MOD_PATH) ] && cp -vf nf_conntrack_ipv4.ko $(CT_IPV4_MOD_PATH)
+	depmod
 	dmesg -c
 

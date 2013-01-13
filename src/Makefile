@@ -4,12 +4,13 @@ all: socksnatd
 socksnatd: socksnatd.o
 	gcc -o $@ $^ -lpthread
 
-%.o: %.c
-	gcc -c $(CFLAGS) -o $@ $<
-
 clean:
 	rm -f socksnatd *.o
 
-up:
-	make up -C netfilter
+install: all
+	make install -C netfilter
+	cp -vf socksnatd /usr/local/bin/
+
+%.o: %.c
+	gcc -c $(CFLAGS) -o $@ $<
 
