@@ -66,18 +66,31 @@ static int do_daemonize(void)
 	return 0;
 }
 
+static int set_nonblock(int sfd)
+{
+	if (fcntl(sfd, F_SETFL,
+		fcntl(sfd, F_GETFD, 0) | O_NONBLOCK) == -1)
+		return -1;
+	return 0;
+}
+
+
 static void *conn_thread(void *arg)
 {
 	int cli_sock = (int)(long)arg;
 	int svr_sock;
 	struct sockaddr_in loc_addr, cli_addr, svr_addr;
-	int loc_alen = sizeof(loc_addr);
-	int cli_alen = sizeof(cli_addr);
-	fd_set rset;
-	int maxfd, rlen, tlen;
-	char buf[1024 * 4];
-	size_t buf_sz = sizeof(buf);
+	int loc_alen = sizeof(loc_addr),
+		cli_alen = sizeof(cli_addr);
 	struct ct_query_req ct_req;
+
+	fd_set rset, wset;
+	int maxfd;
+	char req_buf[1024 * 4], rsp_buf[1024 * 4];
+	const size_t req_buf_sz = sizeof(req_buf),
+				 rsp_buf_sz = sizeof(rsp_buf);
+	size_t req_dlen = 0, rsp_dlen = 0,
+		   req_rpos = 0, rsp_rpos = 0;
 	int ret;
 
 	/* Get current session addresses. */
@@ -130,31 +143,73 @@ static void *conn_thread(void *arg)
 				strerror(errno));
 		goto out2;
 	}
+	
+	/* Set non-blocking. */
+	if (set_nonblock(cli_sock) < 0) {
+		fprintf(stderr, "*** set_nonblock(cli_sock) failed: %s.");
+		goto out2;
+	}
+	if (set_nonblock(svr_sock) < 0) {
+		fprintf(stderr, "*** set_nonblock(svr_sock) failed: %s.");
+		goto out2;
+	}
 
 	for (;;) {
 		FD_ZERO(&rset);
-		FD_SET(cli_sock, &rset);
-		FD_SET(svr_sock, &rset);
+		FD_ZERO(&wset);
+		maxfd = 0;
+
+		if (req_dlen == 0) {
+			FD_SET(cli_sock, &rset);
+		} else {
+			FD_SET(svr_sock, &wset);
+		}
+
+		if (rsp_dlen == 0) {
+			FD_SET(svr_sock, &rset);
+		} else {
+			FD_SET(cli_sock, &wset);
+		}
+
 		maxfd = svr_sock > cli_sock ? svr_sock : cli_sock;
 
-		ret = select(maxfd + 1, &rset, NULL, NULL, NULL);
-		if (ret < 0)
+		ret = select(maxfd + 1, &rset, &wset, NULL, NULL);
+		if (ret < 0) {
 			break;
-		else if (ret == 0)
+		} else if (ret == 0) {
 			break;
+		}
 
-		if (FD_ISSET(cli_sock, &rset)) {
-			if ((rlen = recv(cli_sock, buf, buf_sz, 0)) <= 0)
+		if (FD_ISSET(svr_sock, &wset)) {
+			if ((ret = send(svr_sock, req_buf + req_rpos, req_dlen - req_rpos, 0)) <= 0) {
 				break;
-			if ((tlen = send(svr_sock, buf, rlen, 0)) <= 0)
-				break;
+			}
+			req_rpos += ret;
+			if (req_rpos >= req_dlen) {
+				req_dlen = req_rpos = 0;
+			}
 		}
 
 		if (FD_ISSET(svr_sock, &rset)) {
-			if ((rlen = recv(svr_sock, buf, buf_sz, 0)) <= 0)
+			if ((rsp_dlen = recv(svr_sock, rsp_buf, rsp_buf_sz, 0)) <= 0) {
 				break;
-			if ((tlen = send(cli_sock, buf, rlen, 0)) <= 0)
+			}
+		}
+
+		if (FD_ISSET(cli_sock, &rset)) {
+			if ((req_dlen = recv(cli_sock, req_buf, req_buf_sz, 0)) <= 0) {
 				break;
+			}
+		}
+
+		if (FD_ISSET(cli_sock, &wset)) {
+			if ((ret = send(cli_sock, rsp_buf + rsp_rpos, rsp_dlen - rsp_rpos, 0)) <= 0) {
+				break;
+			}
+			rsp_rpos += ret;
+			if (rsp_rpos >= req_dlen) {
+				rsp_dlen = rsp_rpos = 0;
+			}
 		}
 	}
 
@@ -205,7 +260,7 @@ int main(int argc, char *argv[])
 
 	g_ct_fd = open("/proc/ip_conntrack_query", O_RDONLY);
 	if (g_ct_fd < 0) {
-		fprintf(stderr, "*** Failed to open 'ip_conntrack': %s.",
+		fprintf(stderr, "*** Failed to open 'ip_conntrack_query': %s.\n",
 			strerror(errno));
 		exit(1);
 	}
