@@ -258,9 +258,9 @@ int main(int argc, char *argv[])
 		exit(127);
 	}
 
-	g_ct_fd = open("/proc/ip_conntrack_query", O_RDONLY);
+	g_ct_fd = open("/proc/socksnat_conntrack", O_RDONLY);
 	if (g_ct_fd < 0) {
-		fprintf(stderr, "*** Failed to open 'ip_conntrack_query': %s.\n",
+		fprintf(stderr, "*** Failed to open '/proc/socksnat_conntrack': %s.\n",
 			strerror(errno));
 		exit(1);
 	}
