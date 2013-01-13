@@ -17,6 +17,8 @@ socksnatd: socksnatd.o
 	gcc -c $(CFLAGS) -o $@ $<
 
 install: all
+	- rmmod socksnat
+	insmod socksnat.ko
 	cp -vf socksnatd /usr/local/bin/
 	mkdir -p /lib/modules/$(shell uname -r)/kernel/misc
 	cp -vf socksnat.ko /lib/modules/$(shell uname -r)/kernel/misc/
