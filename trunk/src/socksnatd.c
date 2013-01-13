@@ -22,13 +22,13 @@ typedef int bool;
 
 struct ct_query_req {
 	__u8   l4proto;
-	struct __ct_dnated_in {
+	struct __ct_dnated_addr {
 		__be32 sip;
 		__be32 dip;
 		__be16 sport;
 		__be16 dport;
 	} dnated;
-	struct __ct_original_out {
+	struct __ct_orig_addr {
 		__be32 sip;
 		__be32 dip;
 		__be16 sport;
@@ -47,7 +47,7 @@ static int do_daemonize(void)
 	if ((ret = fork()) < 0) {
 		fprintf(stderr, "*** fork() error: %s.", strerror(errno));
 		return ret;
-	} else if(ret > 0) {
+	} else if (ret > 0) {
 		/* In parent process */
 		exit(0);
 	} else {
@@ -59,6 +59,8 @@ static int do_daemonize(void)
 		dup2(fd, STDIN_FILENO);
 		dup2(fd, STDOUT_FILENO);
 		dup2(fd, STDERR_FILENO);
+		if (fd > 2)
+			close(fd);
 		chdir("/tmp");
 	}
 	return 0;
@@ -108,15 +110,6 @@ static void *conn_thread(void *arg)
 				strerror(errno));
 		goto out1;
 	}
-
-	//{
-	//	char s1[20], s2[20];
-	//	printf("   Original request: %s:%d -> %s:%d\n",
-	//			strcpy(s1, inet_ntoa(*(struct in_addr *)&ct_req.orig.sip)),
-	//			ntohs(ct_req.orig.sport),
-	//			strcpy(s2, inet_ntoa(*(struct in_addr *)&ct_req.orig.dip)),
-	//			ntohs(ct_req.orig.dport));
-	//}
 
 	/* Connect to real target address. */
 	svr_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -181,7 +174,7 @@ int main(int argc, char *argv[])
 	int opt;
 	bool is_daemon = false;
 	bool under_tsocks = false;
-	
+
 	while ((opt = getopt(argc, argv, "dz")) != -1) {
 		switch (opt) {
 		case 'd':
@@ -194,7 +187,7 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 	}
-	
+
 	/* Program should work together with 'tsocks'. */
 	if (!under_tsocks) {
 		char **nargv;
@@ -204,9 +197,12 @@ int main(int argc, char *argv[])
 		nargv[argc + 1] = "-z";
 		nargv[argc + 2] = NULL;
 		execvp("tsocks", nargv);
+		fprintf(stderr, "*** Failed to run 'tsocks', please "
+				"check if it has been correctly installed.\n"
+				"*** Error reason: %s.\n", strerror(errno));
 		exit(127);
 	}
-	
+
 	g_ct_fd = open("/proc/ip_conntrack_query", O_RDONLY);
 	if (g_ct_fd < 0) {
 		fprintf(stderr, "*** Failed to open 'ip_conntrack': %s.",

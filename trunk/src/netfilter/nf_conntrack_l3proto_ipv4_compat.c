@@ -381,13 +381,13 @@ static const struct file_operations ct_cpu_seq_fops = {
 
 struct ct_query_req {
 	__u8   l4proto;
-	struct __ct_dnated_in {
+	struct __ct_dnated_addr {
 		__be32 sip;
 		__be32 dip;
 		__be16 sport;
 		__be16 dport;
 	} dnated;
-	struct __ct_original_out {
+	struct __ct_orig_addr {
 		__be32 sip;
 		__be32 dip;
 		__be16 sport;
