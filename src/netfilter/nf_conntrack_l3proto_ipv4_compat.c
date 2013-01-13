@@ -377,6 +377,89 @@ static const struct file_operations ct_cpu_seq_fops = {
 	.release = seq_release,
 };
 
+#define CT_GET_ORIG_BY_DNATED _IOR('I', 'G', int)
+
+struct ct_query_req {
+	__u8   l4proto;
+	struct __ct_dnated_in {
+		__be32 sip;
+		__be32 dip;
+		__be16 sport;
+		__be16 dport;
+	} dnated;
+	struct __ct_original_out {
+		__be32 sip;
+		__be32 dip;
+		__be16 sport;
+		__be16 dport;
+	} orig;
+};
+
+static int ct_query_open(struct inode *inode, struct file *file)
+{
+	return 0;
+}
+
+static int ct_query_release(struct inode *inode, struct file *file)
+{
+	return 0;
+}
+
+static int ct_query_ioctl(struct inode *inode, struct file *file,
+						  unsigned int cmd, unsigned long arg)
+{
+	
+	switch (cmd) {
+	case CT_GET_ORIG_BY_DNATED: {
+			struct ct_query_req req;
+			struct nf_conntrack_tuple tuple, *orig;
+			struct nf_conntrack_tuple_hash *h;
+			struct nf_conn *ct;
+
+			if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+				return -EFAULT;
+
+			/* Find 'nf_conn' by translated address. */
+			memset(&tuple, 0x0, sizeof(tuple));
+			tuple.src.l3num = PF_INET;
+			tuple.src.u3.ip = req.dnated.dip;
+			tuple.dst.u3.ip = req.dnated.sip;
+			tuple.src.u.tcp.port = req.dnated.dport;
+			tuple.dst.u.tcp.port = req.dnated.sport;
+			tuple.dst.protonum = req.l4proto;
+			tuple.dst.dir = IP_CT_DIR_REPLY;
+			
+			h = nf_conntrack_find_get(&tuple);
+			if (h == NULL)
+				return -EINVAL;
+			ct = nf_ct_tuplehash_to_ctrack(h);
+			
+			/* Fill addresses in request structure to return. */
+			orig = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
+			req.orig.sip = orig->src.u3.ip;
+			req.orig.dip = orig->dst.u3.ip;
+			req.orig.sport = orig->src.u.tcp.port;
+			req.orig.dport = orig->dst.u.tcp.port;
+			if (copy_to_user((void __user *)arg, &req, sizeof(req))) {
+				nf_ct_put(ct);
+				return -EFAULT;
+			}
+
+			nf_ct_put(ct);
+			return 0;
+			break;
+		}
+	}
+	return -EINVAL;
+}
+
+static const struct file_operations ct_query_fops = {
+	.owner   = THIS_MODULE,
+	.open    = ct_query_open,
+	.release = ct_query_release,
+	.ioctl   = ct_query_ioctl,
+};
+
 int __init nf_conntrack_ipv4_compat_init(void)
 {
 	struct proc_dir_entry *proc, *proc_exp, *proc_stat;
@@ -394,6 +477,9 @@ int __init nf_conntrack_ipv4_compat_init(void)
 				init_net.proc_net_stat, &ct_cpu_seq_fops);
 	if (!proc_stat)
 		goto err3;
+
+	proc_create_data("ip_conntrack_query", 0444, NULL, &ct_query_fops, &init_net);
+
 	return 0;
 
 err3:
@@ -406,6 +492,7 @@ err1:
 
 void __exit nf_conntrack_ipv4_compat_fini(void)
 {
+	remove_proc_entry("ip_conntrack_query", NULL);
 	remove_proc_entry("ip_conntrack", init_net.proc_net_stat);
 	proc_net_remove(&init_net, "ip_conntrack_expect");
 	proc_net_remove(&init_net, "ip_conntrack");
