@@ -124,6 +124,16 @@ static void *conn_thread(void *arg)
 		goto out1;
 	}
 
+	/*
+	 * Drop connections whose original target address is same
+	 *  as the translated one.
+	 */
+	if (ct_req.dnated.dip == ct_req.orig.dip &&
+		ct_req.dnated.dport == ct_req.orig.dport) {
+		fprintf(stderr, "*** The requested address may cause loop, drop it.\n");
+		goto out1;
+	}
+
 	/* Connect to real target address. */
 	svr_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (svr_sock < 0) {
@@ -212,6 +222,9 @@ static void *conn_thread(void *arg)
 			}
 		}
 	}
+
+	printf("-- Client %s:%d exited.\n",
+		inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
 
 out2:
 	close(svr_sock);
