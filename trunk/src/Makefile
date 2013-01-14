@@ -3,7 +3,6 @@ all: socksnatd socksnat.ko
 # Driver module
 
 KERNSRC ?= /lib/modules/$(shell uname -r)/build
-CC      ?= gcc
 
 obj-m := socksnat.o
 
