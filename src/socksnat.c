@@ -1,12 +1,6 @@
-/* ip_conntrack proc compat - based on ip_conntrack_standalone.c
- *
- * (C) 1999-2001 Paul `Rusty' Russell
- * (C) 2002-2006 Netfilter Core Team <coreteam@netfilter.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+#include <linux/kernel.h>
+#include <linux/version.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -46,8 +40,14 @@ static int socksnat_ct_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 35)
 static int socksnat_ct_ioctl(struct inode *inode, struct file *file,
-						  unsigned int cmd, unsigned long arg)
+							 unsigned int cmd, unsigned long arg)
+#else
+static long socksnat_ct_ioctl(struct file *file, unsigned int cmd,
+							  unsigned long arg)
+#endif
+
 {
 	switch (cmd) {
 	case CT_GET_ORIG_BY_DNATED: {
@@ -68,8 +68,14 @@ static int socksnat_ct_ioctl(struct inode *inode, struct file *file,
 			tuple.dst.u.tcp.port = req.dnated.sport;
 			tuple.dst.protonum = req.l4proto;
 			tuple.dst.dir = IP_CT_DIR_REPLY;
-			
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 27)
 			h = nf_conntrack_find_get(&tuple);
+#elif LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 33)
+			h = nf_conntrack_find_get(&init_net, &tuple);
+#else
+			h = nf_conntrack_find_get(&init_net, 0, &tuple);
+#endif
 			if (h == NULL)
 				return -EINVAL;
 			ct = nf_ct_tuplehash_to_ctrack(h);
@@ -97,7 +103,11 @@ static const struct file_operations socksnat_ct_fops = {
 	.owner   = THIS_MODULE,
 	.open    = socksnat_ct_open,
 	.release = socksnat_ct_release,
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 35)
 	.ioctl   = socksnat_ct_ioctl,
+#else
+	.unlocked_ioctl = socksnat_ct_ioctl,
+#endif
 };
 
 int __init socksnat_init(void)
