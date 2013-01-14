@@ -80,8 +80,8 @@ static void *conn_thread(void *arg)
 	int cli_sock = (int)(long)arg;
 	int svr_sock;
 	struct sockaddr_in loc_addr, cli_addr, svr_addr;
-	int loc_alen = sizeof(loc_addr),
-		cli_alen = sizeof(cli_addr);
+	socklen_t loc_alen = sizeof(loc_addr),
+			  cli_alen = sizeof(cli_addr);
 	struct ct_query_req ct_req;
 
 	fd_set rset, wset;
@@ -156,11 +156,13 @@ static void *conn_thread(void *arg)
 	
 	/* Set non-blocking. */
 	if (set_nonblock(cli_sock) < 0) {
-		fprintf(stderr, "*** set_nonblock(cli_sock) failed: %s.");
+		fprintf(stderr, "*** set_nonblock(cli_sock) failed: %s.",
+				strerror(errno));
 		goto out2;
 	}
 	if (set_nonblock(svr_sock) < 0) {
-		fprintf(stderr, "*** set_nonblock(svr_sock) failed: %s.");
+		fprintf(stderr, "*** set_nonblock(svr_sock) failed: %s.",
+				strerror(errno));
 		goto out2;
 	}
 
