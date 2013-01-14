@@ -171,19 +171,23 @@ static void *conn_thread(void *arg)
 		FD_ZERO(&wset);
 		maxfd = 0;
 
-		if (req_dlen == 0) {
+		if (!req_dlen && !rsp_dlen) {
 			FD_SET(cli_sock, &rset);
-		} else {
-			FD_SET(svr_sock, &wset);
-		}
-
-		if (rsp_dlen == 0) {
 			FD_SET(svr_sock, &rset);
+			maxfd = svr_sock > cli_sock ? svr_sock : cli_sock;
+		} else if (req_dlen && !rsp_dlen) {
+			FD_SET(svr_sock, &rset);
+			FD_SET(svr_sock, &wset);
+			maxfd = svr_sock;
+		} else if (!req_dlen && rsp_dlen) {
+			FD_SET(cli_sock, &rset);
+			FD_SET(cli_sock, &wset);
+			maxfd = cli_sock;
 		} else {
 			FD_SET(cli_sock, &wset);
+			FD_SET(svr_sock, &wset);
+			maxfd = svr_sock > cli_sock ? svr_sock : cli_sock;
 		}
-
-		maxfd = svr_sock > cli_sock ? svr_sock : cli_sock;
 
 		ret = select(maxfd + 1, &rset, &wset, NULL, NULL);
 		if (ret < 0) {
