@@ -36,7 +36,7 @@ How to use:
     make
     make install
    Note:
-    (1) Before compiling the kernel module, you should install the packages of kernel header files or your Linux distribution.
+    (1) Before compiling the kernel module, you should install packages of your Linux distribution that contain kernel header files.
     (2) 'socksnat.ko' is saved at /lib/modules/<kernel_version>/kernel/misc/, 'socksnatd' is saved at /usr/local/bin/.
 
 2. Load the kernel module:
@@ -44,7 +44,7 @@ How to use:
    You may confirm the kernel module is correctly loaded by this:
     root@lenny-r50:~# lsmod | grep socksnat
     socksnat                2112  0
-    nf_conntrack           55540  5 socksnat,ipt_MASQUERADE,iptable_nat,nf_nat,nf_conntrack_ipv4
+    nf_conntrack           55540  5 socksnat,iptable_nat,nf_nat,nf_conntrack_ipv4
     root@lenny-r50:~#
 
    For being automatically loaded at system startup, you may add 'socksnat' to /etc/modules.
