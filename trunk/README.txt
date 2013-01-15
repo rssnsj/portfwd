@@ -1,4 +1,4 @@
-Design NAT mechanism of TCP layer to SOCKS protocol transforming.
+Design NAT mechanism of IP packet to SOCKS protocol transforming.
 
 Description:
   I've launched a very small but very useful project. I name it "SOCKS NAT".
@@ -27,3 +27,41 @@ This project includes a kernel module and a user-space daemon.
 
 3. Solution of SOCKS5 implementation:
     Simply wrap the program with 'tsock', so do not have to write a new one.
+
+---------------------------------------------------
+How to use:
+
+1. Compile kernel module and the application, and install:
+    cd src
+    make
+    make install
+   Note: 'socksnat.ko' is saved at /lib/modules/<kernel_version>/kernel/misc/, 'socksnatd' is saved at /usr/local/bin/.
+
+2. Load the kernel module:
+    modprobe socksnat
+   For being automatically loaded at system startup, you may add 'socksnat' to /etc/modules.
+
+3. Add filewall rules for forwarding TCP connections to 'socksnatd':
+   e.g., the gateway IP is 10.255.0.1, and you with it to provide proxy service for subnet 10.255.0.0/24, the rules can be issued by: 
+    iptables -t nat -A PREROUTING -s 10.255.0.0/24 -p tcp -j DNAT --to 10.255.0.1:7070
+   Note: 7070 is the TCP proxy port that 'socksnatd' listens.
+
+4. Install and setup 'tsocks':
+   'tsocks' helps 'socksnatd' to proxy connections to SOCKS tunnel.
+   In Ubuntu, Debian, install by:
+    apt-get install tsocks
+   In RedHat, Fedora or CentOS, install by:
+    yum install tsocks
+   Then edit /etc/tsocks.conf, set your SOCKS service address there, and fix the 'local' fields.
+
+5. Start the service:
+    /usr/local/bin/socksnatd -d
+
+6. Set networking for other devices:
+   e.g., the gateway IP is 10.255.0.1/24, you may set your mobile phone like this:
+    IP address: 10.255.0.x
+    Netmask: 255.255.255.0
+    Gateway: 10.255.0.1
+    DNS: <unhijacked_DNS>
+   Note: since DNS resolving over tunnel has not been implemented, please use an unhijacked DNS address, or you still cannot visit Facebook, YouTube, Twitter in China.
+
