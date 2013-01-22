@@ -240,8 +240,24 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 			return -1;
 		}
 	} else if (g_socks_version == 4) {
-		fprintf(stderr, "*** SOCKS4 is not supported at present, exited.\n");
-		exit(10);
+		/* SOCKS4 is quite simple, only a 'CONNECT' handshake. */
+		buf[0] = SOCKS_V4;
+		buf[1] = SOCKS_CONNECT;
+		memcpy(buf + 2, &svr_sa->sin_port, 2);
+		memcpy(buf + 4, &svr_sa->sin_addr, 4);
+		buf[8] = 0;	/* empty username */
+		if (x_send_n(sfd, buf, 9, 0) != 9) {
+			errno = ECONNREFUSED;
+			return -1;
+		}
+		if (x_recv_n(sfd, buf, 8, 0, g_recv_timeout) != 8) {
+			errno = ECONNREFUSED;
+			return -1;
+		}
+		if (buf[1] != 90) {
+			errno = ECONNREFUSED;
+			return -1;
+		}
 	} else {
 		fprintf(stderr, "*** Unsupported SOCKS version '%d'.\n", g_socks_version);
 		errno = EINVAL;
@@ -434,6 +450,8 @@ static void show_help(int argc, char *argv[])
 	printf("  %s [-s socks_ip:socks_port] [-d] [-z]\n", argv[0]);
 	printf("Options:\n");
 	printf("  -s socks_ip:socks_port      -- specify SOCKS server address, default: 127.0.0.1:7070\n");
+	printf("  -4                          -- use SOCKS4\n");
+	printf("  -5                          -- use SOCKS5 (default)\n");
 	printf("  -d                          -- run at background\n");
 	printf("  -z                          -- do not use SOCKS, just proxy\n");
 }
@@ -447,7 +465,7 @@ int main(int argc, char *argv[])
 	bool is_daemon = false;
 	struct rlimit rlim;
 
-	while ((opt = getopt(argc, argv, "s:dzh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:dzh45")) != -1) {
 		switch (opt) {
 		case 's': {
 			char s_socks_host[40];
@@ -467,6 +485,13 @@ int main(int argc, char *argv[])
 			break;
 		case 'z':
 			g_enable_socks = false;
+			break;
+		case '4':
+			/* Force SOCKS4, default is SOCKS5. */
+			g_socks_version = 4;
+			break;
+		case '5':
+			g_socks_version = 5;
 			break;
 		case 'h':
 			show_help(argc, argv);
@@ -514,9 +539,9 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("SOCKS Proxy NAT started, listening %s:%d.\n",
-			inet_ntoa(lsn_addr.sin_addr),
-			ntohs(lsn_addr.sin_port));
+	printf("SOCKS Proxy NAT started, listening %s:%d, using SOCKS%d.\n",
+			inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port),
+			g_socks_version);
 
 	/* Work as a daemon process. */
 	if (is_daemon)
