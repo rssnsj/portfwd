@@ -13,7 +13,7 @@ socksnatd: socksnatd.o
 	gcc -o $@ $^ -lpthread
 
 %.o: %.c
-	gcc -c $(CFLAGS) -o $@ $<
+	gcc -c -Wall $(CFLAGS) -o $@ $<
 
 install: all
 	- rmmod socksnat
