@@ -1,7 +1,7 @@
-Design NAT mechanism of IP packet to SOCKS protocol transforming.
+NAT mechanism of IP packet to SOCKS protocol transforming.
 
 Description:
-  I've launched a very small but very useful project. I name it "SOCKS NAT".
+  This is a small but very useful project. I name it "SOCKS NAT".
   The goal is to convert a SOCKS proxy service to an IP gateway which is more compatible, e.g., some mobile devices like iPhone do not support SOCKS proxy, so an IP gateway is better and convenient for them.
 
   Currently only myself is in. The first available version has been finished. It can work well now for TCP traffic. The DNS resolving over tunnel is not implemented yet. This is important since in some countries DNS is either hijack or polluted, and I already have a couple of solutions and will continue later.
@@ -54,22 +54,14 @@ How to use:
     iptables -t nat -A PREROUTING -s 10.255.0.0/24 -p tcp -j DNAT --to 10.255.0.1:7070
    Note: 7070 is the TCP proxy port that 'socksnatd' listens.
 
-4. Install and setup 'tsocks':
-   'tsocks' helps 'socksnatd' to proxy connections to SOCKS tunnel.
-   In Ubuntu, Debian, install by:
-    apt-get install tsocks
-   In RedHat, Fedora or CentOS, install by:
-    yum install tsocks
-   Then edit /etc/tsocks.conf, set your SOCKS service address there, and fix the 'local' fields.
+4. Start the service:
+    /usr/local/bin/socksnatd -s <socks_server_ip:socks_server_port> -d
 
-5. Start the service:
-    /usr/local/bin/socksnatd -d
-
-6. Set networking for other devices:
+5. Set networking for other devices:
    e.g., the gateway IP is 10.255.0.1/24, you may set your mobile phone like this:
     IP address: 10.255.0.x
     Netmask: 255.255.255.0
     Gateway: 10.255.0.1
-    DNS: <unhijacked_DNS>
+    DNS: <Unhijacked_DNS>
    Note: since DNS resolving over tunnel has not been implemented, please use an unhijacked DNS address, or you still cannot visit Facebook, YouTube, Twitter in China.
 

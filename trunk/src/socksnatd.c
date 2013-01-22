@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -426,7 +427,7 @@ out1:
 
 static void show_help(int argc, char *argv[])
 {
-	printf("IP-to-SOCKS address translator service.\n");
+	printf("IP-to-SOCKS transforming gateway service.\n");
 	printf("Usage:\n");
 	printf("  %s [-s socks_ip:socks_port] [-d] [-z]\n", argv[0]);
 	printf("Options:\n");
@@ -442,6 +443,7 @@ int main(int argc, char *argv[])
 	int b_reuse = 1;
 	int opt;
 	bool is_daemon = false;
+	struct rlimit rlim;
 
 	while ((opt = getopt(argc, argv, "s:dzh")) != -1) {
 		switch (opt) {
@@ -473,6 +475,14 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/* Enlarge the file descriptor limination. */
+	if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
+		if (rlim.rlim_max < 20480) {
+			rlim.rlim_cur = rlim.rlim_max = 20480;
+			setrlimit(RLIMIT_NOFILE, &rlim);
+		}
+	}
+	
 	g_ct_fd = open("/proc/socksnat_conntrack", O_RDONLY);
 	if (g_ct_fd < 0) {
 		fprintf(stderr, "*** Failed to open '/proc/socksnat_conntrack': %s.\n",
