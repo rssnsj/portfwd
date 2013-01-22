@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -239,7 +240,8 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 			return -1;
 		}
 	} else if (g_socks_version == 4) {
-		
+		fprintf(stderr, "*** SOCKS4 is not supported at present, exited.\n");
+		exit(10);
 	} else {
 		fprintf(stderr, "*** Unsupported SOCKS version '%d'.\n", g_socks_version);
 		errno = EINVAL;
@@ -515,10 +517,16 @@ int main(int argc, char *argv[])
 	printf("SOCKS Proxy NAT started, listening %s:%d.\n",
 			inet_ntoa(lsn_addr.sin_addr),
 			ntohs(lsn_addr.sin_port));
-	
+
 	/* Work as a daemon process. */
 	if (is_daemon)
 		do_daemonize();
+
+	/**
+	 * Ignore PIPE signal, which is triggered by 'send'
+	 *  and will cause the process exit.
+	 */
+	signal(SIGPIPE, SIG_IGN);
 
 	/* Loop for incoming proxy connections. */
 	for (;;) {
