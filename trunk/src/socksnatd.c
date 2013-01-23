@@ -48,6 +48,7 @@ static int            g_socks_version  = 5;
 static int            g_recv_timeout   = 10; 
 static bool           g_enable_socks   = true;
 
+/* Opened file for '/proc/socksnat_conntrack'. */
 static int g_ct_fd = -1;
 
 static int do_daemonize(void)
@@ -180,15 +181,17 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 		buf[1] = 1;
 		buf[2] = SOCKS_NOAUTH;
 		if (x_send_n(sfd, buf, 3, 0) != 3) {
-			fprintf(stderr, "*** [%s:%d] x_send_n() failed.\n",
-					__FUNCTION__, __LINE__);
+			//fprintf(stderr, "*** [%s:%d] x_send_n() failed.\n",
+			//		__FUNCTION__, __LINE__);
 			errno = ECONNREFUSED;
 			return -1;
 		}
 		/* Receive and check the response. */
 		if (x_recv_n(sfd, buf, 2, 0, g_recv_timeout) != 2) {
-			fprintf(stderr, "*** [%s:%d] x_recv_n() failed.\n",
-					__FUNCTION__, __LINE__);
+			//fprintf(stderr, "*** [%s:%d] x_recv_n() failed.\n",
+			//		__FUNCTION__, __LINE__);
+			errno = ECONNREFUSED;
+			return -1;
 		}
 		if (buf[1] == SOCKS_NOMETHOD) {
 			fprintf(stderr, "*** Authentication method negotiation failed.\n");
@@ -205,14 +208,10 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 		memcpy(buf + 8, &svr_sa->sin_port, 2);
 		/* FIXME: data length is 10. */
 		if (x_send_n(sfd, buf, 10, 0) != 10) {
-			//fprintf(stderr, "*** [%s:%d] x_send_n() failed.\n",
-			//		__FUNCTION__, __LINE__);
 			errno = ECONNREFUSED;
 			return -1;
 		}
 		if (x_recv_n(sfd, buf, 4, 0, g_recv_timeout) != 4) {
-			//fprintf(stderr, "*** [%s:%d] x_recv_n() failed.\n",
-			//		__FUNCTION__, __LINE__);
 			errno = ECONNREFUSED;
 			return -1;
 		}
@@ -449,7 +448,8 @@ static void show_help(int argc, char *argv[])
 	printf("Usage:\n");
 	printf("  %s [-s socks_ip:socks_port] [-d] [-z]\n", argv[0]);
 	printf("Options:\n");
-	printf("  -s socks_ip:socks_port      -- specify SOCKS server address, default: 127.0.0.1:7070\n");
+	printf("  -s socks_ip:socks_port      -- specify SOCKS server address, default: 127.0.0.1:1080\n");
+	printf("  -l [local_ip:]port          -- TCP proxy listening address, default: 0.0.0.0:7070\n");
 	printf("  -4                          -- use SOCKS4\n");
 	printf("  -5                          -- use SOCKS5 (default)\n");
 	printf("  -d                          -- run at background\n");
@@ -465,21 +465,37 @@ int main(int argc, char *argv[])
 	bool is_daemon = false;
 	struct rlimit rlim;
 
-	while ((opt = getopt(argc, argv, "s:dzh45")) != -1) {
+	while ((opt = getopt(argc, argv, "l:s:dzh45")) != -1) {
 		switch (opt) {
 		case 's': {
-			char s_socks_host[40];
-			int socks_port;
-			if (sscanf(optarg, "%39[^:]:%d", s_socks_host,
-				&socks_port) != 2) {
-				fprintf(stderr, "*** Invalid argument for '-s'.\n\n");
-				show_help(argc, argv);
-				exit(1);
+				char s_socks_host[20];
+				int socks_port;
+				if (sscanf(optarg, "%19[^:]:%d", s_socks_host,
+					&socks_port) != 2) {
+					fprintf(stderr, "*** Invalid argument for '-s'.\n\n");
+					show_help(argc, argv);
+					exit(1);
+				}
+				g_socks_svr_ip = ntohl(inet_addr(s_socks_host));
+				g_socks_svr_port = (unsigned short)socks_port;
+				break;
 			}
-			g_socks_svr_ip = ntohl(inet_addr(s_socks_host));
-			g_socks_svr_port = socks_port;
-			break;
-		}
+		case 'l': {
+				char s_lsn_ip[20];
+				int lsn_port;
+				if (sscanf(optarg, "%19[^:]:%d", s_lsn_ip,
+					&lsn_port) == 2) {
+					g_tcp_proxy_ip = ntohl(inet_addr(s_lsn_ip));
+					g_tcp_proxy_port = lsn_port;
+				} else if (sscanf(optarg, "%d", &lsn_port) == 1) {
+					g_tcp_proxy_port = (unsigned short)lsn_port;
+				} else {
+					fprintf(stderr, "*** Invalid argument for '-l'.\n\n");
+					show_help(argc, argv);
+					exit(1);
+				}
+				break;
+			}
 		case 'd':
 			is_daemon = true;
 			break;
@@ -539,7 +555,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("SOCKS Proxy NAT started, listening %s:%d, using SOCKS%d.\n",
+	printf("SOCKS Proxy NAT started, listening on %s:%d, using SOCKS%d.\n",
 			inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port),
 			g_socks_version);
 
