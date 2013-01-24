@@ -555,9 +555,16 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("SOCKS Proxy NAT started, listening on %s:%d, using SOCKS%d.\n",
-			inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port),
-			g_socks_version);
+	printf("IP-to-SOCKS NAT service started on %s:%d, ",
+		   inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port));
+	if (g_enable_socks) {
+		struct in_addr socks_svr_ia;
+		socks_svr_ia.s_addr = htonl(g_socks_svr_ip);
+		printf("using SOCKS%d %s:%d.\n", g_socks_version,
+			   inet_ntoa(socks_svr_ia), g_socks_svr_port);
+	} else {
+		printf("no SOCKS proxy.\n");
+	}
 
 	/* Work as a daemon process. */
 	if (is_daemon)
