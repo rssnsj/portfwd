@@ -1,19 +1,20 @@
-all: socksnatd socksnat.ko
-
-# Driver module
+CC = $(CROSS_COMPILE)gcc
 
 KERNSRC ?= /lib/modules/$(shell uname -r)/build
+ARCH ?= x86
+
+all: socksnatd socksnat.ko
 
 obj-m := socksnat.o
 
 socksnat.ko: socksnat.c
-	make -C $(KERNSRC) M=$(shell pwd) modules
+	make -C $(KERNSRC) M=$(shell pwd) modules CROSS_COMPILE=$(CROSS_COMPILE) ARCH=$(ARCH)
 
 socksnatd: socksnatd.o
-	gcc -o $@ $^ -lpthread
+	$(CC) -o $@ $^ -lpthread
 
 %.o: %.c
-	gcc -c -Wall $(CFLAGS) -o $@ $<
+	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
 install: all
 	- rmmod socksnat
