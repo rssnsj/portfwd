@@ -12,31 +12,11 @@
 #include <sys/resource.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <linux/netfilter_ipv4.h>
 
-#define CT_GET_ORIG_BY_DNATED _IOR('I', 'G', int)
-
-typedef u_int32_t __be32;
-typedef u_int16_t __be16;
-typedef u_int8_t  __u8;
 typedef int bool;
 #define true  1
 #define false 0
-
-struct ct_query_req {
-	__u8   l4proto;
-	struct __ct_dnated_addr {
-		__be32 sip;
-		__be32 dip;
-		__be16 sport;
-		__be16 dport;
-	} dnated;
-	struct __ct_orig_addr {
-		__be32 sip;
-		__be32 dip;
-		__be16 sport;
-		__be16 dport;
-	} orig;
-};
 
 static unsigned int   g_tcp_proxy_ip   = 0;
 static unsigned short g_tcp_proxy_port = 7070;
@@ -47,9 +27,6 @@ static int            g_socks_version  = 5;
 
 static int            g_recv_timeout   = 10; 
 static bool           g_enable_socks   = true;
-
-/* Opened file for '/proc/socksnat_conntrack'. */
-static int g_ct_fd = -1;
 
 static int do_daemonize(void)
 {
@@ -157,24 +134,24 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 			(const struct sockaddr_in *)svr_addr;
 	unsigned char buf[1024];
 	int ret;
-	
+
 	/* We only support IPv4, refuse other protocol types. */
 	if (svr_sa->sin_family != AF_INET) {
 		errno = EINVAL;
 		return -1;
 	}
-	
+
 	/* Connect to SOCKS server. */
 	memset(&ss_svr_addr, 0x0, sizeof(ss_svr_addr));
 	ss_svr_addr.sin_family = AF_INET;
 	ss_svr_addr.sin_addr.s_addr = htonl(g_socks_svr_ip);
 	ss_svr_addr.sin_port = htons(g_socks_svr_port);
-	
+
 	ret = connect(sfd, (struct sockaddr *)&ss_svr_addr, sizeof(ss_svr_addr));
 	if (ret < 0) {
 		return ret;
 	}
-	
+
 	if (g_socks_version == 5) {
 		/* Version 5, one method: no authentication */
 		buf[0] = SOCKS_V5;
@@ -198,7 +175,7 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 			errno = ECONNREFUSED;
 			return -1;
 		}
-		
+
 		/* Conduct the 'connect' request. */
 		buf[0] = SOCKS_V5;
 		buf[1] = SOCKS_CONNECT;
@@ -262,7 +239,7 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 		errno = EINVAL;
 		return -1;
 	}
-	
+
 	/* OK, now the connection is ready for send() & recv(). */
 	return 0;
 }
@@ -272,10 +249,11 @@ static void *conn_thread(void *arg)
 {
 	int cli_sock = (int)(long)arg;
 	int svr_sock;
-	struct sockaddr_in loc_addr, cli_addr, svr_addr;
+	struct sockaddr_in loc_addr, cli_addr, orig_dst;
 	socklen_t loc_alen = sizeof(loc_addr),
-			  cli_alen = sizeof(cli_addr);
-	struct ct_query_req ct_req;
+			  cli_alen = sizeof(cli_addr),
+			  orig_alen = sizeof(orig_dst);
+	//struct ct_query_req ct_req;
 	fd_set rset, wset;
 	int maxfd;
 	char req_buf[1024 * 4], rsp_buf[1024 * 4];
@@ -301,33 +279,27 @@ static void *conn_thread(void *arg)
 		goto out1;
 	}
 
-	/* Query in kernel to get the original target IP & port. */
-	memset(&ct_req, 0x0, sizeof(ct_req));
-	ct_req.l4proto = IPPROTO_TCP;
-	ct_req.dnated.sip = cli_addr.sin_addr.s_addr;
-	ct_req.dnated.dip = loc_addr.sin_addr.s_addr;
-	ct_req.dnated.sport = cli_addr.sin_port;
-	ct_req.dnated.dport = loc_addr.sin_port;
-
-	if (ioctl(g_ct_fd, CT_GET_ORIG_BY_DNATED, &ct_req) < 0) {
-		fprintf(stderr, "*** Cannot find conntrack for connection: %s.\n",
+	/* Get the original destination address before translated by Netfiter. */
+	ret = getsockopt(cli_sock, SOL_IP, SO_ORIGINAL_DST,
+				(struct sockaddr_in *)&orig_dst, &orig_alen);
+	if (ret) {
+		fprintf(stderr, "*** getsockopt(SOL_IP) failed: %s.\n",
 				strerror(errno));
 		goto out1;
 	}
 
 	strcpy(s_src_addr, inet_ntoa(cli_addr.sin_addr));
-	strcpy(s_dst_addr, inet_ntoa(*(struct in_addr *)&ct_req.orig.dip));
-
+	strcpy(s_dst_addr, inet_ntoa(orig_dst.sin_addr));
 	printf("-- Client %s:%d entered, to %s:%d.\n",
 		s_src_addr, ntohs(cli_addr.sin_port),
-		s_dst_addr, ntohs(ct_req.orig.dport));
+		s_dst_addr, ntohs(orig_dst.sin_port));
 
 	/*
 	 * Drop connections whose original target address is same
 	 *  as the translated one.
 	 */
-	if (ct_req.dnated.dip == ct_req.orig.dip &&
-		ct_req.dnated.dport == ct_req.orig.dport) {
+	if (loc_addr.sin_addr.s_addr == orig_dst.sin_addr.s_addr &&
+		loc_addr.sin_port == orig_dst.sin_port) {
 		fprintf(stderr, "*** The requested address may cause loop, drop it.\n");
 		goto out1;
 	}
@@ -339,24 +311,19 @@ static void *conn_thread(void *arg)
 		goto out1;
 	}
 
-	memset(&svr_addr, 0x0, sizeof(svr_addr));
-	svr_addr.sin_family = AF_INET;
-	svr_addr.sin_addr.s_addr = ct_req.orig.dip;
-	svr_addr.sin_port = ct_req.orig.dport;
-
 	if (g_enable_socks) {
-		ret = socks_connect(svr_sock, (struct sockaddr *)&svr_addr,
-							sizeof(svr_addr));
+		ret = socks_connect(svr_sock, (struct sockaddr *)&orig_dst,
+							sizeof(orig_dst));
 	} else {
-		ret = connect(svr_sock, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+		ret = connect(svr_sock, (struct sockaddr *)&orig_dst, sizeof(orig_dst));
 	}
 	if ( ret < 0) {
 		fprintf(stderr, "*** Connection to '%s:%d' failed: %s.\n",
-				inet_ntoa(svr_addr.sin_addr), ntohs(svr_addr.sin_port),
+				inet_ntoa(orig_dst.sin_addr), ntohs(orig_dst.sin_port),
 				strerror(errno));
 		goto out2;
 	}
-	
+
 	/* Set non-blocking. */
 	if (set_nonblock(cli_sock) < 0) {
 		fprintf(stderr, "*** set_nonblock(cli_sock) failed: %s.",
@@ -525,13 +492,6 @@ int main(int argc, char *argv[])
 			setrlimit(RLIMIT_NOFILE, &rlim);
 		}
 	}
-	
-	g_ct_fd = open("/proc/socksnat_conntrack", O_RDONLY);
-	if (g_ct_fd < 0) {
-		fprintf(stderr, "*** Failed to open '/proc/socksnat_conntrack': %s.\n",
-			strerror(errno));
-		exit(1);
-	}
 
 	lsn_sock = socket(PF_INET, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
@@ -555,7 +515,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("IP-to-SOCKS NAT service started on %s:%d, ",
+	printf("IP-to-SOCKS gateway service started on %s:%d, ",
 		   inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port));
 	if (g_enable_socks) {
 		struct in_addr socks_svr_ia;
