@@ -1,15 +1,15 @@
 CC = $(CROSS_COMPILE)gcc
 
-socksnatd: socksnatd.o
+rawtcp: rawtcp.o
 	$(CC) -o $@ $^ -lpthread
 
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
-install: socksnatd
+install: rawtcp
 	mkdir -p /usr/local/bin
-	cp -vf socksnatd /usr/local/bin/
+	cp -vf rawtcp /usr/local/bin/
 
 clean:
-	rm -f socksnatd *.o
+	rm -f rawtcp *.o
 
