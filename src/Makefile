@@ -1,4 +1,5 @@
 CC = $(CROSS_COMPILE)gcc
+prefix ?= /usr/local
 
 socksnatd: socksnatd.o
 	$(CC) -o $@ $^ -lpthread
@@ -7,8 +8,8 @@ socksnatd: socksnatd.o
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
 install: socksnatd
-	mkdir -p /usr/local/bin
-	cp -vf socksnatd /usr/local/bin/
+	mkdir -p $(DESTDIR)/$(prefix)/bin
+	cp -vf socksnatd $(DESTDIR)/$(prefix)/bin/
 
 clean:
 	rm -f socksnatd *.o
