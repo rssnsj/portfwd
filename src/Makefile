@@ -1,7 +1,7 @@
 CC = $(CROSS_COMPILE)gcc
 prefix ?= /usr/local
 
-socksnatd: socksnatd.o
+socksnatd: socksnatd.o config.o
 	$(CC) -o $@ $^ -lpthread
 
 %.o: %.c
