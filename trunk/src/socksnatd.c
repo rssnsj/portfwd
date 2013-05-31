@@ -14,9 +14,8 @@
 #include <arpa/inet.h>
 #include <linux/netfilter_ipv4.h>
 
-typedef int bool;
-#define true  1
-#define false 0
+#include "utils.h"
+#include "config.h"
 
 static unsigned int   g_tcp_proxy_ip   = 0;
 static unsigned short g_tcp_proxy_port = 7070;
@@ -26,7 +25,7 @@ static unsigned short g_socks_svr_port = 1080;
 static int            g_socks_version  = 5;
 
 static int            g_recv_timeout   = 10; 
-static bool           g_enable_socks   = true;
+static bool           g_disable_socks  = false;
 
 static int do_daemonize(void)
 {
@@ -119,20 +118,23 @@ static int x_send_n(int sockfd, void *buff, int len, int flags)
 
 
 /**
- * socks_connect - connect to real server over SOCKS proxy.
+ * my_connect - select a proxy and use it to connect to real server
  * parameters:
  *  @sfd: socket descriptor
  *  @svr_addr: IPv4 address of real server
  *  @svr_alen: address length
  * return value: compatible with 'connect()'.
  */
-static int socks_connect(int sfd, const struct sockaddr *svr_addr,
-						 socklen_t svr_alen)
+static int my_connect(int sfd, const struct sockaddr *svr_addr,
+					  socklen_t svr_alen)
 {
 	struct sockaddr_in ss_svr_addr;
 	const struct sockaddr_in *svr_sa =
 			(const struct sockaddr_in *)svr_addr;
 	unsigned char buf[1024];
+	u32 socks_ip   = g_socks_svr_ip;
+	u16 socks_port = g_socks_svr_port;;
+	struct proxy_rule *rule;
 	int ret;
 
 	/* We only support IPv4, refuse other protocol types. */
@@ -141,11 +143,27 @@ static int socks_connect(int sfd, const struct sockaddr *svr_addr,
 		return -1;
 	}
 
+	/* If 'g_disable_socks' set, just bypass to 'connect()'. */
+	if (g_disable_socks)
+		return connect(sfd, svr_addr, svr_alen);
+
+	/* If we find a matched rule, use it for proxy. */
+	if ((rule = lookup_proxy_by_ip(
+		ntohl(((struct sockaddr_in *)svr_addr)->sin_addr.s_addr)))) {
+		socks_ip = rule->proxy_addr;
+		socks_port = rule->proxy_port;
+		//printf("-- %s:%d\n", ipv4_hltos(socks_ip, (char *)buf), socks_port);
+	}
+
+	/* Both socks_ip, socks_port zero indicates using local network */
+	if (socks_ip == 0 && socks_port == 0)
+		return connect(sfd, svr_addr, svr_alen);
+
 	/* Connect to SOCKS server. */
 	memset(&ss_svr_addr, 0x0, sizeof(ss_svr_addr));
 	ss_svr_addr.sin_family = AF_INET;
-	ss_svr_addr.sin_addr.s_addr = htonl(g_socks_svr_ip);
-	ss_svr_addr.sin_port = htons(g_socks_svr_port);
+	ss_svr_addr.sin_addr.s_addr = htonl(socks_ip);
+	ss_svr_addr.sin_port = htons(socks_port);
 
 	ret = connect(sfd, (struct sockaddr *)&ss_svr_addr, sizeof(ss_svr_addr));
 	if (ret < 0) {
@@ -311,13 +329,8 @@ static void *conn_thread(void *arg)
 		goto out1;
 	}
 
-	if (g_enable_socks) {
-		ret = socks_connect(svr_sock, (struct sockaddr *)&orig_dst,
-							sizeof(orig_dst));
-	} else {
-		ret = connect(svr_sock, (struct sockaddr *)&orig_dst, sizeof(orig_dst));
-	}
-	if ( ret < 0) {
+	if (my_connect(svr_sock, (struct sockaddr *)&orig_dst,
+		sizeof(orig_dst)) < 0) {
 		fprintf(stderr, "*** Connection to '%s:%d' failed: %s.\n",
 				inet_ntoa(orig_dst.sin_addr), ntohs(orig_dst.sin_port),
 				strerror(errno));
@@ -467,7 +480,7 @@ int main(int argc, char *argv[])
 			is_daemon = true;
 			break;
 		case 'z':
-			g_enable_socks = false;
+			g_disable_socks = true;
 			break;
 		case '4':
 			/* Force SOCKS4, default is SOCKS5. */
@@ -484,6 +497,10 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 	}
+
+	/* Load proxy rules defined in config file. */
+	if (!g_disable_socks)
+		init_proxy_rules();
 
 	/* Enlarge the file descriptor limination. */
 	if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
@@ -515,15 +532,15 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("IP-to-SOCKS gateway service started on %s:%d, ",
+	printf("Transparent SOCKS gateway service started on %s:%d, ",
 		   inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port));
-	if (g_enable_socks) {
+	if (g_disable_socks) {
+		printf("no SOCKS proxy.\n");
+	} else {
 		struct in_addr socks_svr_ia;
 		socks_svr_ia.s_addr = htonl(g_socks_svr_ip);
 		printf("using SOCKS%d %s:%d.\n", g_socks_version,
 			   inet_ntoa(socks_svr_ia), g_socks_svr_port);
-	} else {
-		printf("no SOCKS proxy.\n");
 	}
 
 	/* Work as a daemon process. */
