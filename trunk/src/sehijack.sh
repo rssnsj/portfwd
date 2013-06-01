@@ -1,6 +1,6 @@
 #!/bin/sh
 
-for F in /usr/local/lib/libsehijack.so /usr/lib/libsehijack.so; do
+for F in `pwd`/libsehijack.so /usr/local/lib/libsehijack.so /usr/lib/libsehijack.so; do
 	[ -e "$F" ] && libfile="$F"
 done
 
