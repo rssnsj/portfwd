@@ -532,14 +532,14 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("Transparent SOCKS gateway service started on %s:%d, ",
+	printf("Transparent proxy service started on %s:%d, ",
 		   inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port));
 	if (g_disable_socks) {
-		printf("no SOCKS proxy.\n");
+		printf("via local network.\n");
 	} else {
 		struct in_addr socks_svr_ia;
 		socks_svr_ia.s_addr = htonl(g_socks_svr_ip);
-		printf("using SOCKS%d %s:%d.\n", g_socks_version,
+		printf("default proxy: SOCKS%d %s:%d.\n", g_socks_version,
 			   inet_ntoa(socks_svr_ia), g_socks_svr_port);
 	}
 
