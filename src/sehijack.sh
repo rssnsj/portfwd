@@ -1,7 +1,7 @@
 #!/bin/sh
 
 for F in `pwd`/libsehijack.so /usr/local/lib/libsehijack.so /usr/lib/libsehijack.so; do
-	[ -e "$F" ] && libfile="$F"
+	[ -e "$F" ] && { libfile="$F"; break; }
 done
 
 if [ -z "$libfile" ]; then
@@ -13,7 +13,7 @@ case "$1" in
 	*.*.*.*:*)
 		hijack_addr="$1"
 		shift 1
-		LD_PRELOAD=./libsehijack.so LIBSEHIJACK_ADDR="$hijack_addr" "$@"
+		LD_PRELOAD=$libfile LIBSEHIJACK_ADDR="$hijack_addr" "$@"
 		;;
 	*)
 		echo "Usage: sehijack <hijacked_ip:hijacked_port> command ..."
