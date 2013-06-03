@@ -47,22 +47,18 @@ static inline bool is_fd_hijacked(int fd)
 		fds_status[fd] == FD_STATUS_HIJACKED);
 }
 
-static inline void byte_enc(void *buf, size_t len)
+static inline void bytes_enc(void *buf, size_t len)
 {
 	unsigned char *ebuf = (unsigned char *)buf;
-	for (; len; ebuf--) {
+	for (; len; len--)
 		*(ebuf++) ^= 0xaf;
-		len--;
-	}
 }
 
-static inline void byte_dec(void *buf, size_t len)
+static inline void bytes_dec(void *buf, size_t len)
 {
 	unsigned char *ebuf = (unsigned char *)buf;
-	for (; len; ebuf--) {
+	for (; len; len--)
 		*(ebuf++) ^= 0xaf;
-		len--;
-	}
 }
 
 int connect(int sockfd, const struct sockaddr *serv_addr,
@@ -155,7 +151,7 @@ ssize_t send(int fd, const void *buf, size_t len, int flags)
 			return -1;
 		}
 		memcpy(ebuf, buf, len);
-		byte_enc(ebuf, len);
+		bytes_enc(ebuf, len);
 		ret = real_send(fd, ebuf, len, flags);
 		free(ebuf);
 		return ret;
@@ -176,7 +172,7 @@ ssize_t write(int fd, const void *buf, size_t len)
 			return -1;
 		}
 		memcpy(ebuf, buf, len);
-		byte_enc(ebuf, len);
+		bytes_enc(ebuf, len);
 		ret = real_write(fd, ebuf, len);
 		free(ebuf);
 		return ret;
@@ -192,7 +188,7 @@ ssize_t recv(int fd, void *buf, size_t len, int flags)
 		ssize_t ret;
 		ret = real_recv(fd, buf, len, flags);
 		if (ret > 0) {
-			byte_dec(buf, ret);
+			bytes_dec(buf, ret);
 		}
 		return ret;
 	} else {
@@ -206,7 +202,7 @@ ssize_t read(int fd, void *buf, size_t len)
 		ssize_t ret;
 		ret = real_read(fd, buf, len);
 		if (ret > 0) {
-			byte_dec(buf, ret);
+			bytes_dec(buf, ret);
 		}
 		return ret;
 	} else {
