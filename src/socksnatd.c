@@ -564,7 +564,7 @@ int main(int argc, char *argv[])
 		if (cli_sock < 0)
 			continue;
 
-		/* Process the connection in new thread. */
+		/* Handle the connection in new thread. */
 		if (pthread_create(&conn_pth, NULL, conn_thread, (void *)(long)cli_sock) == 0)
 			pthread_detach(conn_pth);
 	}
