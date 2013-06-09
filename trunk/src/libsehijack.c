@@ -27,7 +27,7 @@ static int (*real_close)(int fd);
 
 /**
  * Each socket will be checked with this address to mark
- *  if it needs to be hijacketed.
+ *  if it needs to be hijacked.
  *  This address is got from environment variable:
  *  LIBSEHIJACK_ADDR=<socks_ip>:<socks_port>
  */
