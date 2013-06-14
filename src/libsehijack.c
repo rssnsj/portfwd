@@ -15,7 +15,6 @@
 #include "utils.h"
 
 /* Original system functions. */
-
 static int (*real_connect)(int sockfd, const struct sockaddr *serv_addr,
 						   socklen_t addrlen);
 static int (*real_accept)(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
@@ -26,13 +25,15 @@ static ssize_t (*real_read)(int fd, void *buf, size_t count);
 static int (*real_close)(int fd);
 
 /**
- * Each socket will be checked with this address to mark
- *  if it needs to be hijacked.
+ * Each socket will be checked with this address to
+ *  mark if it needs to be hijacked.
  *  This address is got from environment variable:
  *  LIBSEHIJACK_ADDR=<socks_ip>:<socks_port>
  */
 static u32 hijacked_ip = 0;
 static u16 hijacked_port = 0;
+/* One-byte encryption passcode. */
+static unsigned char enc_factor = 0xaf;
 
 /* Socket hijacking status list. */
 #define MAX_FDS_STATUS  (1024 * 64)
@@ -51,14 +52,14 @@ static inline void bytes_enc(void *buf, size_t len)
 {
 	unsigned char *ebuf = (unsigned char *)buf;
 	for (; len; len--)
-		*(ebuf++) ^= 0xaf;
+		*(ebuf++) ^= enc_factor;
 }
 
 static inline void bytes_dec(void *buf, size_t len)
 {
 	unsigned char *ebuf = (unsigned char *)buf;
 	for (; len; len--)
-		*(ebuf++) ^= 0xaf;
+		*(ebuf++) ^= enc_factor;
 }
 
 int connect(int sockfd, const struct sockaddr *serv_addr,
