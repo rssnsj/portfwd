@@ -187,11 +187,11 @@ out1:
 
 static void show_help(int argc, char *argv[])
 {
-	printf("Simple TCP proxy application.\n");
+	printf("Userspace TCP proxy.\n");
 	printf("Usage:\n");
 	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d]\n", argv[0]);
 	printf("Options:\n");
-	printf("  -d                -- run at background\n");
+	printf("  -d                run in background\n");
 }
 
 int main(int argc, char *argv[])
@@ -280,10 +280,10 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("TCP proxy started, mapping %s:%d -> %s:%d\n",
+	printf("TCP proxy %s:%d -> %s:%d started, \n",
 		   s_lsn_ip, lsn_port, s_dst_ip, dst_port);
 
-	/* Work as a daemon process. */
+	/* Run in background. */
 	if (is_daemon)
 		do_daemonize();
 

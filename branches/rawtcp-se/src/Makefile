@@ -1,15 +1,15 @@
 CC = $(CROSS_COMPILE)gcc
 
-rawtcp: rawtcp.o
+rawtcp-se: rawtcp.o
 	$(CC) -o $@ $^ -lpthread
 
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
-install: rawtcp
+install: rawtcp-se
 	mkdir -p /usr/local/bin
-	cp -vf rawtcp /usr/local/bin/
+	cp -vf rawtcp-se /usr/local/bin/
 
 clean:
-	rm -f rawtcp *.o
+	rm -f rawtcp-se *.o
 

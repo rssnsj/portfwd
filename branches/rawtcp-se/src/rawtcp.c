@@ -17,6 +17,38 @@ typedef int bool;
 #define true  1
 #define false 0
 
+/* Functions for encrypted transmission. */
+
+static unsigned char enc_factor = 0xaf; /* one-byte passcode. */
+
+static inline void bytes_enc(void *buf, size_t len)
+{
+	unsigned char *ebuf = (unsigned char *)buf;
+	for (; len; len--)
+		*(ebuf++) ^= enc_factor;
+}
+static inline void bytes_dec(void *buf, size_t len)
+{
+	unsigned char *ebuf = (unsigned char *)buf;
+	for (; len; len--)
+		*(ebuf++) ^= enc_factor;
+}
+
+static ssize_t se_recv(int fd, void *buf, size_t len, int flags)
+{
+	ssize_t ret;
+	ret = recv(fd, buf, len, flags);
+	if (ret > 0)
+		bytes_dec(buf, ret);
+	return ret;
+}
+ssize_t se_send_rwbuf(int fd, void *buf, size_t len, int flags)
+{
+	bytes_enc(buf, len);
+	return send(fd, buf, len, flags);
+}
+/* ****************************************** */
+
 static unsigned int   g_source_ip   = 0;
 static unsigned short g_source_port = 0;
 static unsigned int   g_dest_ip     = 0;
@@ -143,7 +175,7 @@ static void *conn_thread(void *arg)
 		}
 
 		if (FD_ISSET(svr_sock, &wset)) {
-			if ((ret = send(svr_sock, req_buf + req_rpos, req_dlen - req_rpos, 0)) <= 0) {
+			if ((ret = se_send_rwbuf(svr_sock, req_buf + req_rpos, req_dlen - req_rpos, 0)) <= 0) {
 				break;
 			}
 			req_rpos += ret;
@@ -153,7 +185,7 @@ static void *conn_thread(void *arg)
 		}
 
 		if (FD_ISSET(svr_sock, &rset)) {
-			if ((rsp_dlen = recv(svr_sock, rsp_buf, rsp_buf_sz, 0)) <= 0) {
+			if ((rsp_dlen = se_recv(svr_sock, rsp_buf, rsp_buf_sz, 0)) <= 0) {
 				break;
 			}
 		}
@@ -187,11 +219,11 @@ out1:
 
 static void show_help(int argc, char *argv[])
 {
-	printf("Simple TCP proxy application.\n");
+	printf("TCP proxy with simple encryption.\n");
 	printf("Usage:\n");
 	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d]\n", argv[0]);
 	printf("Options:\n");
-	printf("  -d                -- run at background\n");
+	printf("  -d                run in background\n");
 }
 
 int main(int argc, char *argv[])
@@ -280,10 +312,10 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("TCP proxy started, mapping %s:%d -> %s:%d\n",
-		   s_lsn_ip, lsn_port, s_dst_ip, dst_port);
+	printf("TCP proxy %s:%d -> %s:%d started, server connection encrypted (cypher:0x%02x)\n",
+		   s_lsn_ip, lsn_port, s_dst_ip, dst_port, enc_factor);
 
-	/* Work as a daemon process. */
+	/* Run in background. */
 	if (is_daemon)
 		do_daemonize();
 
