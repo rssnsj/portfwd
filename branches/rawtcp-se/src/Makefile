@@ -1,4 +1,5 @@
 CC = $(CROSS_COMPILE)gcc
+CFLAGS =
 
 rawtcp-se: rawtcp.o
 	$(CC) -o $@ $^ -lpthread

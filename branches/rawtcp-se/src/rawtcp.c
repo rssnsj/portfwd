@@ -34,7 +34,8 @@ static inline void bytes_dec(void *buf, size_t len)
 		*(ebuf++) ^= enc_factor;
 }
 
-static ssize_t se_recv(int fd, void *buf, size_t len, int flags)
+/* Receive bytes and then decrypt. */
+static ssize_t recv_and_dec(int fd, void *buf, size_t len, int flags)
 {
 	ssize_t ret;
 	ret = recv(fd, buf, len, flags);
@@ -42,11 +43,37 @@ static ssize_t se_recv(int fd, void *buf, size_t len, int flags)
 		bytes_dec(buf, ret);
 	return ret;
 }
-ssize_t se_send_rwbuf(int fd, void *buf, size_t len, int flags)
+
+/* Receive bytes and then encrypt. */
+static ssize_t recv_and_enc(int fd, void *buf, size_t len, int flags)
 {
-	bytes_enc(buf, len);
-	return send(fd, buf, len, flags);
+	ssize_t ret;
+	ret = recv(fd, buf, len, flags);
+	if (ret > 0)
+		bytes_dec(buf, ret);
+	return ret;
 }
+
+#if 0
+/* Encrypt a buffer and send it. */
+ssize_t enc_and_send(int fd, const void *buf, size_t len, int flags)
+{
+	char *ebuf;
+	ssize_t ret;
+
+	if ((ebuf = (char *)malloc(len)) == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	memcpy(ebuf, buf, len);
+	bytes_enc(ebuf, len);
+	ret = send(fd, ebuf, len, flags);
+	free(ebuf);
+	return ret;
+
+}
+#endif
+
 /* ****************************************** */
 
 static unsigned int   g_source_ip   = 0;
@@ -175,7 +202,7 @@ static void *conn_thread(void *arg)
 		}
 
 		if (FD_ISSET(svr_sock, &wset)) {
-			if ((ret = se_send_rwbuf(svr_sock, req_buf + req_rpos, req_dlen - req_rpos, 0)) <= 0) {
+			if ((ret = send(svr_sock, req_buf + req_rpos, req_dlen - req_rpos, 0)) <= 0) {
 				break;
 			}
 			req_rpos += ret;
@@ -185,13 +212,17 @@ static void *conn_thread(void *arg)
 		}
 
 		if (FD_ISSET(svr_sock, &rset)) {
-			if ((rsp_dlen = se_recv(svr_sock, rsp_buf, rsp_buf_sz, 0)) <= 0) {
+			if ((rsp_dlen = recv_and_dec(svr_sock, rsp_buf, rsp_buf_sz, 0)) <= 0) {
 				break;
 			}
 		}
 
 		if (FD_ISSET(cli_sock, &rset)) {
-			if ((req_dlen = recv(cli_sock, req_buf, req_buf_sz, 0)) <= 0) {
+			/**
+			 * Data is encrypted right after received, so we don't need
+			 *  'malloc()' on sending.
+			 */
+			if ((req_dlen = recv_and_enc(cli_sock, req_buf, req_buf_sz, 0)) <= 0) {
 				break;
 			}
 		}
