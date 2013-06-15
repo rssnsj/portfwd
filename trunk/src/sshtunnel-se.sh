@@ -9,15 +9,8 @@ if [ -z "$libfile" ]; then
 	exit 1
 fi
 
-case "$1" in
-	*.*.*.*:*)
-		hijack_addr="$1"
-		shift 1
-		LD_PRELOAD=$libfile LIBSEHIJACK_ADDR="$hijack_addr" "$@"
-		;;
-	*)
-		echo "Usage: sehijack <hijacked_ip:hijacked_port> command ..."
-		exit 1
-		;;
-esac
+# Address that 'ssh -D' listens on and is hijacked
+tunnel_addr=xx.xx.xx.xx:7707
+
+LD_PRELOAD=$libfile LIBSEHIJACK_ADDR="$tunnel_addr" ssh XXXX@127.0.0.1 -D $tunnel_addr -N -f
 
