@@ -2,16 +2,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/resource.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#ifdef WIN32
+	#include <winsock.h>
+	#include <windows.h>
+	#pragma comment(lib ,"ws2_32.lib")
+	#define inline  __inline
+	typedef HANDLE  pthread_t;
+	typedef long ssize_t;
+	typedef int socklen_t;
+	#define pthread_create(hp, xx, funcp, rp) \
+		( *(hp) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)funcp, (LPVOID)rp, 0, NULL) )
+	#define pthread_detach(h) 
+	#define close(x) closesocket(x)
+	#define signal(s, a)
+#else
+	#include <unistd.h>
+	#include <fcntl.h>
+	#include <pthread.h>
+	#include <signal.h>
+	#include <sys/types.h>
+	#include <sys/ioctl.h>
+	#include <sys/socket.h>
+	#include <sys/resource.h>
+	#include <netinet/in.h>
+	#include <arpa/inet.h>
+#endif
 
 typedef int bool;
 #define true  1
@@ -81,6 +96,16 @@ static unsigned short g_source_port = 0;
 static unsigned int   g_dest_ip     = 0;
 static unsigned short g_dest_port   = 0;
 
+#ifdef WIN32
+static int do_daemonize(void)
+{
+	/**
+	 * FIXME: This function should be implemented as
+	 *  starting as a Windows service process.
+	 */
+	return 0;
+}
+#else
 static int do_daemonize(void)
 {
 	int ret;
@@ -105,12 +130,18 @@ static int do_daemonize(void)
 	}
 	return 0;
 }
+#endif
 
 static int set_nonblock(int sfd)
 {
+#ifdef WIN32
+	u_long iMode = 1;
+	ioctlsocket(sfd, FIONBIO, &iMode);
+#else
 	if (fcntl(sfd, F_SETFL,
 		fcntl(sfd, F_GETFD, 0) | O_NONBLOCK) == -1)
 		return -1;
+#endif
 	return 0;
 }
 
@@ -248,11 +279,11 @@ out1:
 	return NULL;
 }
 
-static void show_help(int argc, char *argv[])
+static void show_help(int argc, char *argv0)
 {
 	printf("TCP proxy with simple encryption.\n");
 	printf("Usage:\n");
-	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d]\n", argv[0]);
+	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d]\n", argv0);
 	printf("Options:\n");
 	printf("  -d                run in background\n");
 }
@@ -262,50 +293,63 @@ int main(int argc, char *argv[])
 	int lsn_sock, cli_sock;
 	struct sockaddr_in lsn_addr;
 	int b_reuse = 1;
-	int opt;
+	int i, j;
 	bool is_daemon = false;
 	char s_lsn_ip[20], s_dst_ip[20];
 	int lsn_port, dst_port;
 
-	while ((opt = getopt(argc, argv, "dh")) != -1) {
-		switch (opt) {
-		case 'd':
-			is_daemon = true;
-			break;
-		case 'h':
-			show_help(argc, argv);
-			exit(0);
-			break;
-		case '?':
-			exit(1);
+#ifdef WIN32
+	WSADATA wsaData;
+	WORD wVersionRequested = MAKEWORD( 2, 1 );
+	WSAStartup( wVersionRequested, &wsaData );
+#endif
+
+	for (i = 1; i < argc; ) {
+		if (argv[i][0] == '-') {
+			switch (argv[i][1]) {
+			case 'd':
+				is_daemon = true;
+				break;
+			case 'h':
+				show_help(argc, argv);
+				exit(0);
+				break;
+			default:
+				show_help(argc, argv);
+				exit(1);
+			}
+			for (j = i + 1; j < argc; j++)
+				argv[j - 1] = argv[j];
+			argc--;
+		} else {
+			i++;
 		}
 	}
 
-	if (optind >= argc) {
+	if (argc < 3) {
 		show_help(argc, argv);
 		exit(1);
 	}
 
 	/* Parse source address. */
-	if (sscanf(argv[optind], "%19[^:]:%d", s_lsn_ip,
+	if (sscanf(argv[1], "%19[^:]:%d", s_lsn_ip,
 		&lsn_port) == 2) {
 		g_source_ip = ntohl(inet_addr(s_lsn_ip));
 		g_source_port = lsn_port;
-	} else if (sscanf(argv[optind], "%d", &lsn_port) == 1) {
+	} else if (sscanf(argv[1], "%d", &lsn_port) == 1) {
 		g_source_port = (unsigned short)lsn_port;
 	} else {
 		fprintf(stderr, "*** Invalid source address '%s'.\n",
-				argv[optind]);
+				argv[1]);
 		show_help(argc, argv);
 		exit(1);
 	}
-	optind++;
 
 	/* Parse destination address. */
-	if (sscanf(argv[optind], "%19[^:]:%d", s_dst_ip,
+	if (sscanf(argv[2], "%19[^:]:%d", s_dst_ip,
 		&dst_port) != 2) {
 		fprintf(stderr, "*** Invalid destination address '%s'.\n",
-				argv[optind]);
+				argv[2]);
 		show_help(argc, argv);
 		exit(1);
 	}
@@ -373,6 +417,9 @@ int main(int argc, char *argv[])
 			pthread_detach(conn_pth);
 	}
 
+#ifdef WIN32
+	WSACleanup();
+#endif
 	return 0;
 }
 
