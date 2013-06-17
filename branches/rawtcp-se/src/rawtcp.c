@@ -279,7 +279,7 @@ out1:
 	return NULL;
 }
 
-static void show_help(int argc, char *argv0)
+static void show_help(int argc, const char *argv0)
 {
 	printf("TCP proxy with simple encryption.\n");
 	printf("Usage:\n");
@@ -311,11 +311,11 @@ int main(int argc, char *argv[])
 				is_daemon = true;
 				break;
 			case 'h':
-				show_help(argc, argv);
+				show_help(argc, argv[0]);
 				exit(0);
 				break;
 			default:
-				show_help(argc, argv);
+				show_help(argc, argv[0]);
 				exit(1);
 			}
 			for (j = i + 1; j < argc; j++)
@@ -327,7 +327,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (argc < 3) {
-		show_help(argc, argv);
+		show_help(argc, argv[0]);
 		exit(1);
 	}
 
@@ -341,7 +341,7 @@ int main(int argc, char *argv[])
 	} else {
 		fprintf(stderr, "*** Invalid source address '%s'.\n",
 				argv[1]);
-		show_help(argc, argv);
+		show_help(argc, argv[0]);
 		exit(1);
 	}
 
@@ -350,7 +350,7 @@ int main(int argc, char *argv[])
 		&dst_port) != 2) {
 		fprintf(stderr, "*** Invalid destination address '%s'.\n",
 				argv[2]);
-		show_help(argc, argv);
+		show_help(argc, argv[0]);
 		exit(1);
 	}
 	g_dest_ip = ntohl(inet_addr(s_dst_ip));
