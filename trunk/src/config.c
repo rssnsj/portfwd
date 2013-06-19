@@ -12,9 +12,14 @@ static void proxy_rule_show(unsigned long edata, char *buf)
 {
 	struct proxy_server *ps = (struct proxy_server *)edata;
 	char s1[20];
-	sprintf(buf, "%s:%d",
-		ipv4_hltos(ntohl(ps->server_sa.sin_addr.s_addr), s1),
-		ntohs(ps->server_sa.sin_port));
+	if (ps->server_sa.sin_addr.s_addr == 0 &&
+		ps->server_sa.sin_port == 0) {
+		sprintf(buf, "none");
+	} else {
+		sprintf(buf, "%s:%d",
+			ipv4_hltos(ntohl(ps->server_sa.sin_addr.s_addr), s1),
+			ntohs(ps->server_sa.sin_port));
+	}
 }
 
 static struct ipv4_rules g_proxy_rules = {
@@ -94,6 +99,18 @@ struct proxy_server *get_socks_server_by_ip(u32 ip)
 	}
 }
 
+#if 0
+static void dump_proxy_rules(void)
+{
+	size_t showlen;
+	char *showstr;
+	
+	showstr = ipv4_rules_show_mem(&g_proxy_rules, &showlen);
+	printf("%s", showstr);
+	printf("Total proxy servers: %d\n", g_proxy_servers_len);
+}
+#endif
+
 /**
  * Load configs from file.
  * Process exits in case of any error.
@@ -131,9 +148,9 @@ void init_proxy_rules_or_exit(void)
 			 *  10.255.2.0/24 = none
 			 */
 			char *netp = line, *proxyp = ep + 1;
-			char s_net[20], s_mask[20], s_proxy_ip[20];
-			u32 netaddr = 0, netmask = 0, proxy_ip = 0;
-			int proxy_port = 0, net_bits = 0;
+			char s_proxy_ip[20];
+			u32 proxy_ip = 0;
+			int proxy_port = 0;
 			
 			*ep = '\0';
 			while (*netp && __isspace(*netp)) netp++;
@@ -161,38 +178,57 @@ void init_proxy_rules_or_exit(void)
 				g_default_proxy.server_sa.sin_port = htons(proxy_port);
 				g_is_default_proxy_defined = true;
 			} else {
-				/* Parse network/mask pair */
-				if (sscanf(netp, "%19[^/]/%19[^ \t]", s_net, s_mask) != 2) {
-					fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
-					exit(1);
-				}
-				if (!is_ipv4_addr(s_net)) {
-					fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
-					exit(1);
-				} else {
+				char s_net[20], s_mask[20], s_start[20], s_end[20];
+
+				/* Destination network part */
+				if (sscanf(netp, "%19[^/]/%19[^ \t]", s_net, s_mask) == 2) {
+					u32 netaddr = 0, netmask = 0;
+					int net_bits = 0;
+					
+					/* network/mask or network/bits */
+					if (!is_ipv4_addr(s_net)) {
+						fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
+						exit(1);
+					}
+					/* network/bits */
 					netaddr = ipv4_stohl(s_net);
-				}
-				if (is_ipv4_addr(s_mask))
-					netmask = ipv4_stohl(s_mask);
-				else if (sscanf(s_mask, "%d", &net_bits) == 1)
-					netmask = netbits_to_mask(net_bits);
-				else {
-					fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
+					if (is_ipv4_addr(s_mask)) {
+						netmask = ipv4_stohl(s_mask);
+						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+						ipv4_rules_add_netmask(&g_proxy_rules, netaddr, netmask,
+							(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
+						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+					} else if (sscanf(s_mask, "%d", &net_bits) == 1) {
+						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+						ipv4_rules_add_net(&g_proxy_rules, netaddr, net_bits,
+							(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
+						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
+					} else {
+						fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
+						exit(1);
+					}
+				} else if (sscanf(netp, "%19[^-]-%19[^ \t]", s_start, s_end) == 2) {
+					u32 start, end;
+					
+					if (!is_ipv4_addr(s_start) || !is_ipv4_addr(s_end)) {
+						fprintf(stderr, "*** Invalid start-end format: %s.\n", netp);
+						exit(1);
+					}
+					start = ipv4_stohl(s_start);
+					end = ipv4_stohl(s_end);
+					ipv4_rules_add_range(&g_proxy_rules, start, end,
+						(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
+				} else {
+					fprintf(stderr, "*** Bad network range description: %s.\n", netp);
 					exit(1);
 				}
-				if ((netaddr & netmask) != netaddr) {
-					fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
-					exit(1);
-				}
-				
-				/* OK, add the rule. */
-				ipv4_rules_add_netmask(&g_proxy_rules, netaddr, netmask,
-					(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
 			}
 		} else {
 			fprintf(stderr, "*** Ignored unrecognized config line: %s", line);
 		}
 	}
 	fclose(fp);
+	
+	//dump_proxy_rules();
 }
 
