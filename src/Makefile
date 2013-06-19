@@ -1,9 +1,10 @@
 CC = $(CROSS_COMPILE)gcc
+CFLAGS = -g
 prefix ?= /usr/local
 
 all: socksnatd libsehijack.so
 
-socksnatd: socksnatd.o config.o
+socksnatd: socksnatd.o config.o ipv4_rules.o
 	$(CC) -o $@ $^ -lpthread
 
 libsehijack.so: libsehijack.c
