@@ -17,7 +17,6 @@ install: all
 	mkdir -p $(DESTDIR)$(prefix)/bin
 	mkdir -p $(DESTDIR)$(prefix)/lib
 	cp -vf socksnatd $(DESTDIR)$(prefix)/bin/
-	cp -vf sehijack.sh $(DESTDIR)$(prefix)/bin/
 	cp -vf libsehijack.so $(DESTDIR)$(prefix)/lib/
 
 clean:
