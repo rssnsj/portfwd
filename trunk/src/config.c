@@ -3,44 +3,114 @@
 #include <string.h>
 #include <errno.h>
 
-#include "utils.h"
+#include "ipv4_rules.h"
 #include "config.h"
 
 static const char *g_default_cfg_file = "/etc/socksnatd.conf";
 
-#define MAX_PROXY_RULES 1024
-static struct proxy_rule g_proxy_rules[MAX_PROXY_RULES];
-static int g_proxy_rules_num = 0;
-
-struct proxy_rule *lookup_proxy_by_ip(u32 ip)
+static void proxy_rule_show(unsigned long edata, char *buf)
 {
+	struct proxy_server *ps = (struct proxy_server *)edata;
+	char s1[20];
+	sprintf(buf, "%s:%d",
+		ipv4_hltos(ntohl(ps->server_sa.sin_addr.s_addr), s1),
+		ntohs(ps->server_sa.sin_port));
+}
+
+static struct ipv4_rules g_proxy_rules = {
+	.map_table = NULL,
+	.fn_show_edata = proxy_rule_show,
+};
+
+/* Table that stores SOCKS server address. */
+static struct proxy_server *g_proxy_servers = NULL;
+static int g_proxy_servers_sz = 0;   /* current table size */
+static int g_proxy_servers_len = 0;  /* current used items */
+
+/* Pseudo 'proxy_server' entry for "default = xxxx" rule. */
+static struct proxy_server g_default_proxy;
+static bool g_is_default_proxy_defined = false;
+
+/**
+ * insert_proxy_addr_or_get - search in 'g_proxy_servers',
+ *  if not exists add a new one, and return its address.
+ */
+static struct proxy_server *insert_proxy_addr_or_get(u32 ip, u16 port)
+{
+	struct proxy_server *ps;
 	int i;
-	struct proxy_rule *rule;
 	
-	for (i = 0; i < g_proxy_rules_num; i++) {
-		rule = &g_proxy_rules[i];
-		if ((ip & rule->netmask) == rule->netaddr)
-			return rule;
+	/* Find in table if this address already exists. */
+	for (i = 0; i < g_proxy_servers_len; i++) {
+		ps = &g_proxy_servers[i];
+		if (ps->server_sa.sin_addr.s_addr == htonl(ip) &&
+			ps->server_sa.sin_port == htons(port)) {
+			return ps;
+		}
 	}
-	return NULL;
+	
+	/* When we need to add a new entry, check mem alloc first. */
+	if (g_proxy_servers == NULL) {
+		g_proxy_servers_sz = 10; /* the initial size */
+		g_proxy_servers = (struct proxy_server *)
+			malloc(sizeof(struct proxy_server) * g_proxy_servers_sz);
+		if (g_proxy_servers == NULL) {
+			fprintf(stderr, "*** malloc() failed: %s.\n", strerror(errno));
+			exit(1);
+		}
+	} else if (g_proxy_servers_len >= g_proxy_servers_sz) {
+		/* double the size */
+		g_proxy_servers_sz *= 2;
+		g_proxy_servers = (struct proxy_server *)realloc(g_proxy_servers,
+				sizeof(struct proxy_server) * g_proxy_servers_sz);
+		if (g_proxy_servers == NULL) {
+			fprintf(stderr, "*** realloc() failed: %s.\n", strerror(errno));
+			exit(1);
+		}
+	}
+	ps = &g_proxy_servers[g_proxy_servers_len++];
+	memset(ps, 0x0, sizeof(ps[0]));
+	ps->socks_version = 5; /* FIXME: should get version from rule */
+	ps->server_sa.sin_family = AF_INET;
+	ps->server_sa.sin_addr.s_addr = htonl(ip);
+	ps->server_sa.sin_port = htons(port);
+	return ps;
+}
+
+/**
+ * get_socks_server_by_ip - do fast table lookup to
+ *  get a defined proxy rule.
+ */
+struct proxy_server *get_socks_server_by_ip(u32 ip)
+{
+	unsigned long ps_edata;
+	
+	if (ipv4_rules_check(&g_proxy_rules, ip, &ps_edata)) {
+		return (struct proxy_server *)ps_edata;
+	} else if (g_is_default_proxy_defined) {
+		return &g_default_proxy;
+	} else {
+		return NULL;
+	}
 }
 
 /**
  * Load configs from file.
  * Process exits in case of any error.
  */
-void init_proxy_rules(void)
+void init_proxy_rules_or_exit(void)
 {
 	FILE *fp;
 	char line[100];
 	static size_t line_sz = sizeof(line);
-	struct proxy_rule rule;
 	
 	if ((fp = fopen(g_default_cfg_file, "r")) == NULL) {
-		fprintf(stderr, "Warning: Config file %s not found, "
-			"use default proxy setting.\n", g_default_cfg_file);
-		return;
+		fprintf(stderr, "*** Config file %s not found.",
+				g_default_cfg_file);
+		exit(1);
 	}
+	
+	ipv4_rules_init(&g_proxy_rules);
 	
 	while (!feof(fp)) {
 		size_t line_len;
@@ -60,57 +130,67 @@ void init_proxy_rules(void)
 			 *  10.255.0.0/24 = 127.0.0.1:1080
 			 *  10.255.2.0/24 = none
 			 */
-			char *netp = line, *svrp = ep + 1;
-			char s_net[20], s_mask[20], s_svrip[20];
-			int svr_port, net_bits;
+			char *netp = line, *proxyp = ep + 1;
+			char s_net[20], s_mask[20], s_proxy_ip[20];
+			u32 netaddr = 0, netmask = 0, proxy_ip = 0;
+			int proxy_port = 0, net_bits = 0;
 			
-			memset(&rule, 0x0, sizeof(rule));
 			*ep = '\0';
 			while (*netp && __isspace(*netp)) netp++;
-			while (*svrp && __isspace(*svrp)) svrp++;
+			while (*proxyp && __isspace(*proxyp)) proxyp++;
 			
-			/* Parse network/mask pair */
-			if (sscanf(netp, "%19[^/]/%19[^ \t]", s_net, s_mask) != 2) {
-				fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
-				exit(1);
-			}
-			if (!is_ipv4_addr(s_net)) {
-				fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
-				exit(1);
+			/**
+			 * Parse server address part first since the network/mask
+			 *  part might be a "default".
+			 */
+			if (strncmp(proxyp, "none", 4) == 0) {
+				proxy_ip = 0;
+				proxy_port = 0;
+			} else if (sscanf(proxyp, "%19[^:]:%d", s_proxy_ip, &proxy_port) == 2) {
+				proxy_ip = ipv4_stohl(s_proxy_ip);
+				proxy_port = (u16)proxy_port;
 			} else {
-				rule.netaddr = ipv4_stohl(s_net);
-			}
-			if (is_ipv4_addr(s_mask))
-				rule.netmask = ipv4_stohl(s_mask);
-			else if (sscanf(s_mask, "%d", &net_bits) == 1)
-				rule.netmask = netbits_to_mask(net_bits);
-			else {
-				fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
-				exit(1);
-			}
-			if ((rule.netaddr & rule.netmask) != rule.netaddr) {
-				fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
+				fprintf(stderr, "*** Invalid proxy_ip:proxy_port pair: %s.\n", proxyp);
 				exit(1);
 			}
 			
-			/* Parse proxy server part */
-			if (strncmp(svrp, "none", 4) == 0) {
-				rule.proxy_addr = 0;
-				rule.proxy_port = 0;
-			} else if (sscanf(svrp, "%19[^:]:%d", s_svrip, &svr_port) == 2) {
-				rule.proxy_addr = ipv4_stohl(s_svrip);
-				rule.proxy_port = (u16)svr_port;
+			if (strncmp(netp, "default", 7) == 0) {
+				g_default_proxy.socks_version = 5; /* FIXME: should get version from rule */
+				g_default_proxy.server_sa.sin_family = AF_INET;
+				g_default_proxy.server_sa.sin_addr.s_addr = htonl(proxy_ip);
+				g_default_proxy.server_sa.sin_port = htons(proxy_port);
+				g_is_default_proxy_defined = true;
 			} else {
-				fprintf(stderr, "*** Invalid proxy_addr:proxy_port pair: %s.\n", svrp);
-				exit(1);
+				/* Parse network/mask pair */
+				if (sscanf(netp, "%19[^/]/%19[^ \t]", s_net, s_mask) != 2) {
+					fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
+					exit(1);
+				}
+				if (!is_ipv4_addr(s_net)) {
+					fprintf(stderr, "*** Bad network/mask pair: %s.\n", netp);
+					exit(1);
+				} else {
+					netaddr = ipv4_stohl(s_net);
+				}
+				if (is_ipv4_addr(s_mask))
+					netmask = ipv4_stohl(s_mask);
+				else if (sscanf(s_mask, "%d", &net_bits) == 1)
+					netmask = netbits_to_mask(net_bits);
+				else {
+					fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
+					exit(1);
+				}
+				if ((netaddr & netmask) != netaddr) {
+					fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
+					exit(1);
+				}
+				
+				/* OK, add the rule. */
+				ipv4_rules_add_netmask(&g_proxy_rules, netaddr, netmask,
+					(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
 			}
-			
-			/* Check table size and add the rule */
-			if (g_proxy_rules_num >= MAX_PROXY_RULES - 1) {
-				fprintf(stderr, "*** Proxy rule items exceed limitation %d.\n", MAX_PROXY_RULES - 1);
-				exit(1);
-			}
-			g_proxy_rules[g_proxy_rules_num++] = rule;
+		} else {
+			fprintf(stderr, "*** Ignored unrecognized config line: %s", line);
 		}
 	}
 	fclose(fp);

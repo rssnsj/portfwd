@@ -19,13 +19,8 @@
 
 static unsigned int   g_tcp_proxy_ip   = 0;
 static unsigned short g_tcp_proxy_port = 7070;
-
-static unsigned int   g_socks_svr_ip   = 0x7f000001;  /* 127.0.0.1 */
-static unsigned short g_socks_svr_port = 1080;
 static int            g_socks_version  = 5;
-
 static int            g_recv_timeout   = 10; 
-static bool           g_disable_socks  = false;
 
 static int do_daemonize(void)
 {
@@ -132,41 +127,33 @@ static int my_connect(int sfd, const struct sockaddr *svr_addr,
 	const struct sockaddr_in *svr_sa =
 			(const struct sockaddr_in *)svr_addr;
 	unsigned char buf[1024];
-	u32 socks_ip   = g_socks_svr_ip;
-	u16 socks_port = g_socks_svr_port;;
-	struct proxy_rule *rule;
+	struct proxy_server *ps;
 	int ret;
-
+	
 	/* We only support IPv4, refuse other protocol types. */
 	if (svr_sa->sin_family != AF_INET) {
-		errno = EINVAL;
+		errno = EADDRNOTAVAIL;
 		return -1;
 	}
-
-	/* If 'g_disable_socks' set, just bypass to 'connect()'. */
-	if (g_disable_socks)
-		return connect(sfd, svr_addr, svr_alen);
-
+	
 	/* If we find a matched rule, use it for proxy. */
-	if ((rule = lookup_proxy_by_ip(
-		ntohl(((struct sockaddr_in *)svr_addr)->sin_addr.s_addr)))) {
-		socks_ip = rule->proxy_addr;
-		socks_port = rule->proxy_port;
-		//printf("-- %s:%d\n", ipv4_hltos(socks_ip, (char *)buf), socks_port);
-	}
-
-	/* Both socks_ip, socks_port zero indicates using local network */
-	if (socks_ip == 0 && socks_port == 0)
+	ps = get_socks_server_by_ip(
+		ntohl(((struct sockaddr_in *)svr_addr)->sin_addr.s_addr));
+	if (!ps) {
+		/* No matching rule, use local network. */
 		return connect(sfd, svr_addr, svr_alen);
-
+	} else if (ps->server_sa.sin_addr.s_addr == 0 &&
+			ps->server_sa.sin_port == 0) {
+		/* Explicitly defined 'none', use local network. */
+		return connect(sfd, svr_addr, svr_alen);
+	}
+	
 	/* Connect to SOCKS server. */
-	memset(&ss_svr_addr, 0x0, sizeof(ss_svr_addr));
-	ss_svr_addr.sin_family = AF_INET;
-	ss_svr_addr.sin_addr.s_addr = htonl(socks_ip);
-	ss_svr_addr.sin_port = htons(socks_port);
-
+	ss_svr_addr = ps->server_sa;
+	
 	ret = connect(sfd, (struct sockaddr *)&ss_svr_addr, sizeof(ss_svr_addr));
 	if (ret < 0) {
+		errno = ENETUNREACH;
 		return ret;
 	}
 
@@ -211,7 +198,7 @@ static int my_connect(int sfd, const struct sockaddr *svr_addr,
 			return -1;
 		}
 		if (buf[1] != 0) {
-			fprintf(stderr, "*** Connection failed, SOCKS error %d.\n", buf[1]);
+			fprintf(stderr, "*** SOCKS handshake failed, SOCKS error %d.\n", buf[1]);
 			errno = ECONNREFUSED;
 			return -1;
 		}
@@ -428,12 +415,8 @@ static void show_help(int argc, char *argv[])
 	printf("Usage:\n");
 	printf("  %s [-s socks_ip:socks_port] [-d] [-z]\n", argv[0]);
 	printf("Options:\n");
-	printf("  -s socks_ip:socks_port      -- specify SOCKS server address, default: 127.0.0.1:1080\n");
-	printf("  -l [local_ip:]port          -- TCP proxy listening address, default: 0.0.0.0:7070\n");
-	printf("  -4                          -- use SOCKS4\n");
-	printf("  -5                          -- use SOCKS5 (default)\n");
-	printf("  -d                          -- run at background\n");
-	printf("  -z                          -- do not use SOCKS, just proxy\n");
+	printf("  -l [local_ip:]port          TCP proxy listening address, default: 0.0.0.0:7070\n");
+	printf("  -d                          run in background\n");
 }
 
 int main(int argc, char *argv[])
@@ -445,21 +428,8 @@ int main(int argc, char *argv[])
 	bool is_daemon = false;
 	struct rlimit rlim;
 
-	while ((opt = getopt(argc, argv, "l:s:dzh45")) != -1) {
+	while ((opt = getopt(argc, argv, "l:dh")) != -1) {
 		switch (opt) {
-		case 's': {
-				char s_socks_host[20];
-				int socks_port;
-				if (sscanf(optarg, "%19[^:]:%d", s_socks_host,
-					&socks_port) != 2) {
-					fprintf(stderr, "*** Invalid argument for '-s'.\n\n");
-					show_help(argc, argv);
-					exit(1);
-				}
-				g_socks_svr_ip = ntohl(inet_addr(s_socks_host));
-				g_socks_svr_port = (unsigned short)socks_port;
-				break;
-			}
 		case 'l': {
 				char s_lsn_ip[20];
 				int lsn_port;
@@ -479,16 +449,6 @@ int main(int argc, char *argv[])
 		case 'd':
 			is_daemon = true;
 			break;
-		case 'z':
-			g_disable_socks = true;
-			break;
-		case '4':
-			/* Force SOCKS4, default is SOCKS5. */
-			g_socks_version = 4;
-			break;
-		case '5':
-			g_socks_version = 5;
-			break;
 		case 'h':
 			show_help(argc, argv);
 			exit(0);
@@ -499,8 +459,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* Load proxy rules defined in config file. */
-	if (!g_disable_socks)
-		init_proxy_rules();
+	init_proxy_rules_or_exit();
 
 	/* Enlarge the file descriptor limination. */
 	if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
@@ -532,16 +491,8 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	printf("Transparent proxy service started on %s:%d, ",
+	printf("Transparent proxy service started on %s:%d\n",
 		   inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port));
-	if (g_disable_socks) {
-		printf("via local network.\n");
-	} else {
-		struct in_addr socks_svr_ia;
-		socks_svr_ia.s_addr = htonl(g_socks_svr_ip);
-		printf("default proxy: SOCKS%d %s:%d.\n", g_socks_version,
-			   inet_ntoa(socks_svr_ia), g_socks_svr_port);
-	}
 
 	/* Work as a daemon process. */
 	if (is_daemon)

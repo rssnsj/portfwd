@@ -36,10 +36,14 @@ How to use:
     iptables -t nat -A PREROUTING -s 10.255.0.0/24 -p tcp -j DNAT --to 10.255.0.1:7070
    Note: 7070 is the TCP proxy port that 'socksnatd' listens.
 
-4. Start the service:
+4. Generate the configuration file:
+   Copy socksnatd.conf from source directory to /etc/socksnatd.conf.
+   Make necessary changes according to your requirement.
+
+5. Start the service:
     /usr/local/bin/socksnatd -s <socks_server_ip:socks_server_port> -d
 
-5. Set networking for other devices:
+6. Set networking for other devices:
    e.g., the gateway IP is 10.255.0.1/24, you may set your mobile phone like this:
     IP address: 10.255.0.x
     Netmask: 255.255.255.0

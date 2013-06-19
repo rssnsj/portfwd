@@ -1,17 +1,17 @@
 #ifndef __CONFIG_H
 #define __CONFIG_H
 
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 #include "utils.h"
 
-struct proxy_rule {
-	u32 netaddr;
-	u32 netmask;
-	/* proxy_addr = 0 means no proxy to this network*/
-	u32 proxy_addr;
-	u16 proxy_port;
+struct proxy_server {
+	int socks_version;
+	struct sockaddr_in server_sa;
 };
 
-struct proxy_rule *lookup_proxy_by_ip(u32 ip);
-void init_proxy_rules(void);
+struct proxy_server *get_socks_server_by_ip(u32 ip);
+void init_proxy_rules_or_exit(void);
 
 #endif /* __CONFIG_H */
