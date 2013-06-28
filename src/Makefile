@@ -10,7 +10,7 @@ socksnatd: socksnatd.o config.o ipv4_rules.o
 libsehijack.so: libsehijack.c
 	$(CC) -Wall -fPIC -nostdlib -shared -D_GNU_SOURCE -ldl -o $@ $<
 
-%.o: %.c
+%.o: %.c config.h ipv4_rules.h utils.h
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
 install: all

@@ -99,7 +99,7 @@ struct proxy_server *get_socks_server_by_ip(u32 ip)
 	}
 }
 
-#if 0
+#ifdef DUMP_PROXY_RULES
 static void dump_proxy_rules(void)
 {
 	size_t showlen;
@@ -194,15 +194,11 @@ void init_proxy_rules_or_exit(void)
 					netaddr = ipv4_stohl(s_net);
 					if (is_ipv4_addr(s_mask)) {
 						netmask = ipv4_stohl(s_mask);
-						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
 						ipv4_rules_add_netmask(&g_proxy_rules, netaddr, netmask,
 							(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
-						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
 					} else if (sscanf(s_mask, "%d", &net_bits) == 1) {
-						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
 						ipv4_rules_add_net(&g_proxy_rules, netaddr, net_bits,
 							(unsigned long)insert_proxy_addr_or_get(proxy_ip, proxy_port));
-						/* =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-= */
 					} else {
 						fprintf(stderr, "*** Invalid network/mask pair: %s.\n", netp);
 						exit(1);
@@ -229,6 +225,8 @@ void init_proxy_rules_or_exit(void)
 	}
 	fclose(fp);
 	
-	//dump_proxy_rules();
+#ifdef DUMP_PROXY_RULES
+	dump_proxy_rules();
+#endif
 }
 
