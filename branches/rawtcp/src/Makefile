@@ -1,7 +1,8 @@
 CC = $(CROSS_COMPILE)gcc
+CFLAGS = 
 
 rawtcp: rawtcp.o
-	$(CC) -o $@ $^ -lpthread
+	$(CC) -o $@ $^ -levent
 
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
