@@ -55,7 +55,7 @@ static int set_nonblock(int sfd)
 	return 0;
 }
 
-
+/* SOCKS protocol constants. */
 #define SOCKS_V5	5
 #define SOCKS_V4	4
 #define SOCKS_NOAUTH	0
