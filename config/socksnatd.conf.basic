@@ -3,8 +3,10 @@
 # the default rule please write: "default = xxxx"
 
 # default - US
-default = 127.0.0.1:1085
+default = 127.0.0.1:1080
 
-# a remote private network
-192.168.0.0/24 = none
+# Local networks
+192.168.0.0/16 = none
+172.16.0.0/12 = none
+10.0.0.0/8 = none
 
