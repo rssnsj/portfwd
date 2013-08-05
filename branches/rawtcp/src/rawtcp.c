@@ -163,83 +163,56 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
  */
 static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 {
-	struct epoll_event ev;
+	struct epoll_event ev_cli, ev_svr;
+	
+	ev_cli.events = 0;
+	ev_svr.events = 0;
 	
 	switch(conn->state) {
 		case CT_SERVER_CONNECTING:
-			/* Wait for the server connection to complete. */
-			ev.data.ptr = &conn->ev_server;
-			ev.events = EPOLLOUT;
-			if (conn->server_in_ep)
-				epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev); /* FIXME: result */
-			else
-				epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-			conn->server_in_ep = true;
+			/* Wait for the server connection to establish. */
+			ev_svr.events = EPOLLOUT;
 			break;
 		case CT_SERVER_CONNECTED:
 			/* Connection established, data forwarding in progress. */
 			if (!conn->request.dlen && !conn->response.dlen) {
-				ev.data.ptr = &conn->ev_client;
-				ev.events = EPOLLIN;
-				if (conn->client_in_ep)
-					epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev);
-				else
-					epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev);
-				conn->client_in_ep = true;
-				
-				ev.data.ptr = &conn->ev_server;
-				ev.events = EPOLLIN;
-				if (conn->server_in_ep)
-					epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev);
-				else
-					epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-				conn->server_in_ep = true;
+				ev_cli.events = EPOLLIN;
+				ev_svr.events = EPOLLIN;
 			} else if (conn->request.dlen && !conn->response.dlen) {
-				ev.data.ptr = &conn->ev_server;
-				ev.events = EPOLLIN | EPOLLOUT;
-				if (conn->server_in_ep) {
-					epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev);
-				} else {
-					epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-					conn->server_in_ep = true;
-				}
-				
-				if (conn->client_in_ep) {
-					epoll_ctl(epfd, EPOLL_CTL_DEL, conn->cli_sock, NULL);
-					conn->client_in_ep = false;
-				}
+				ev_svr.events = EPOLLIN | EPOLLOUT;
 			} else if (!conn->request.dlen && conn->response.dlen) {
-				ev.data.ptr = &conn->ev_client;
-				ev.events = EPOLLIN | EPOLLOUT;
-				if (conn->client_in_ep) {
-					epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev);
-				} else {
-					epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev);
-					conn->client_in_ep = true;
-				}
-				
-				if (conn->server_in_ep) {
-					epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
-					conn->server_in_ep = false;
-				}
+				ev_cli.events = EPOLLIN | EPOLLOUT;
 			} else {
-				ev.data.ptr = &conn->ev_client;
-				ev.events = EPOLLOUT;
-				if (conn->client_in_ep)
-					epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev);
-				else
-					epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev);
-				conn->client_in_ep = true;
-				
-				ev.data.ptr = &conn->ev_server;
-				ev.events = EPOLLOUT;
-				if (conn->server_in_ep)
-					epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev);
-				else
-					epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-				conn->server_in_ep = true;
+				ev_cli.events = EPOLLOUT;
+				ev_svr.events = EPOLLOUT;
 			}
 			break;
+	}
+	
+	if (ev_cli.events) {
+		ev_cli.data.ptr = &conn->ev_client;
+		if (conn->client_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev_cli); /* FIXME: result */
+		else
+			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev_cli);
+		conn->client_in_ep = true;
+	} else {
+		if (conn->client_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->cli_sock, NULL);
+		conn->client_in_ep = false;
+	}
+	
+	if (ev_svr.events) {
+		ev_svr.data.ptr = &conn->ev_server;
+		if (conn->server_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev_svr);
+		else
+			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev_svr);
+		conn->server_in_ep = true;
+	} else {
+		if (conn->server_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
+		conn->server_in_ep = false;
 	}
 }
 
@@ -525,13 +498,12 @@ int main(int argc, char *argv[])
 				continue;
 			}
 			
-			if (*evptr == EV_MAGIC_CLIENT) {
+			if (*evptr == EV_MAGIC_CLIENT)
 				conn = container_of(evptr, struct proxy_conn, ev_client);
-			} else if (*evptr == EV_MAGIC_SERVER) {
+			else if (*evptr == EV_MAGIC_SERVER)
 				conn = container_of(evptr, struct proxy_conn, ev_server);
-			} else {
+			else
 				assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
-			}
 			
 			switch (conn->state) {
 				case CT_SERVER_CONNECTING:
