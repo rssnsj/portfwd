@@ -76,10 +76,15 @@ enum ev_magic {
 };
 
 struct buffer_info {
+	char *buf;
 	unsigned rpos;
 	unsigned dlen;
-	char buf[4096];
+	unsigned size;
+	//char buf[4096];
 };
+
+#define REQ_BUFFER_SIZE 4096
+#define RSP_BUFFER_SIZE 4096
 
 /**
  * Connection tracking information to indicate
@@ -169,6 +174,12 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 		close(conn->cli_sock);
 	if (conn->svr_sock >= 0)
 		close(conn->svr_sock);
+	
+	if (conn->request.buf)
+		free(conn->request.buf);
+	if (conn->response.buf)
+		free(conn->response.buf);
+	
 	free(conn);
 }
 
@@ -299,19 +310,32 @@ static void do_server_connected(struct proxy_conn *conn, int epfd)
 	socklen_t errlen = sizeof(err);
 	
 	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err,
-		&errlen) == 0) {
-		/* Connected, prepare for data forwarding. */
-		if (err == 0) {
-			conn->state = CT_SERVER_CONNECTED;
-			set_conn_epoll_fds(conn, epfd);
-		} else {
-			fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
-			release_proxy_conn(conn, NULL, 0);
-		}
-	} else {
+		&errlen) < 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
 		release_proxy_conn(conn, NULL, 0);
+		return;
 	}
+	/* Connected, prepare for data forwarding. */
+	if (err != 0) {
+		fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
+		release_proxy_conn(conn, NULL, 0);
+		return;
+	}
+	
+	/* Allocate both buffers. */
+	conn->request.size = REQ_BUFFER_SIZE;
+	conn->response.size = RSP_BUFFER_SIZE;
+	conn->request.buf = (char *)malloc(conn->request.size);
+	conn->response.buf = (char *)malloc(conn->response.size);
+	if (!conn->request.buf || !conn->response.buf) {
+		fprintf(stderr, "*** Failed to allocate either request "
+				"or response buffers.\n");
+		release_proxy_conn(conn, NULL, 0);
+		return;
+	}
+	
+	conn->state = CT_SERVER_CONNECTED;
+	set_conn_epoll_fds(conn, epfd);
 }
 
 static void do_forward_data(struct proxy_conn *conn, int epfd,
@@ -333,7 +357,7 @@ static void do_forward_data(struct proxy_conn *conn, int epfd,
 	}
 	
 	if (ev->events & EPOLLIN) {
-		if ((ret = recv(efd , rxb->buf, sizeof(rxb->buf), 0)) <= 0) {
+		if ((ret = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
 			release_proxy_conn(conn, pending_evs, pending_fds);
