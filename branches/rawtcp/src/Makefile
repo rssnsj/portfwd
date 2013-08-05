@@ -1,4 +1,5 @@
 CC = $(CROSS_COMPILE)gcc
+CFLAGS = -g
 
 rawtcp: rawtcp.o
 	$(CC) -o $@ $^ $(LDFLAGS) -levent

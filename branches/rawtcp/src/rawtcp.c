@@ -112,6 +112,22 @@ struct proxy_conn {
 	struct buffer_info response;
 };
 
+/**
+ * Get 'conn' structure by passing the ev.data.ptr
+ * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
+ *  or EV_MAGIC_SERVER.
+ */
+static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
+{
+	if (*evptr == EV_MAGIC_CLIENT)
+		return container_of(evptr, struct proxy_conn, ev_client);
+	else if (*evptr == EV_MAGIC_SERVER)
+		return container_of(evptr, struct proxy_conn, ev_server);
+	else
+		assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
+	return NULL;
+}
+
 static inline struct proxy_conn *alloc_proxy_conn(void)
 {
 	struct proxy_conn *conn;
@@ -318,9 +334,9 @@ static void do_forward_data(struct proxy_conn *conn, int epfd,
 	
 	if (ev->events & EPOLLIN) {
 		if ((ret = recv(efd , rxb->buf, sizeof(rxb->buf), 0)) <= 0) {
-			release_proxy_conn(conn, pending_evs, pending_fds);
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
+			release_proxy_conn(conn, pending_evs, pending_fds);
 			return;
 		}
 		rxb->dlen = (unsigned)ret;
@@ -329,9 +345,9 @@ static void do_forward_data(struct proxy_conn *conn, int epfd,
 	if (ev->events & EPOLLOUT) {
 		if ((ret = send(efd, txb->buf + txb->rpos,
 			txb->dlen - txb->rpos, 0)) <= 0) {
-			release_proxy_conn(conn, pending_evs, pending_fds);
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
+			release_proxy_conn(conn, pending_evs, pending_fds);
 			return;
 		}
 		txb->rpos += ret;
@@ -498,12 +514,7 @@ int main(int argc, char *argv[])
 				continue;
 			}
 			
-			if (*evptr == EV_MAGIC_CLIENT)
-				conn = container_of(evptr, struct proxy_conn, ev_client);
-			else if (*evptr == EV_MAGIC_SERVER)
-				conn = container_of(evptr, struct proxy_conn, ev_server);
-			else
-				assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
+			conn = get_conn_by_evptr(evptr);
 			
 			switch (conn->state) {
 				case CT_SERVER_CONNECTING:
