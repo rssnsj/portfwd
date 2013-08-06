@@ -64,9 +64,10 @@ static int set_nonblock(int sfd)
 	(type *)((char *)__mptr - offsetof(type, member)); })
 
 /* Statues indicators of proxy sessions. */
-enum ct_state {
-	CT_SERVER_CONNECTING,
-	CT_SERVER_CONNECTED,
+enum conn_state {
+	S_INVALID,
+	S_SERVER_CONNECTING,
+	S_FORWARDING,
 };
 
 enum ev_magic {
@@ -80,11 +81,10 @@ struct buffer_info {
 	unsigned rpos;
 	unsigned dlen;
 	unsigned size;
-	//char buf[4096];
 };
 
-#define REQ_BUFFER_SIZE 4096
-#define RSP_BUFFER_SIZE 4096
+#define REQ_BUFFER_SIZE 8192
+#define RSP_BUFFER_SIZE 8192
 
 /**
  * Connection tracking information to indicate
@@ -196,11 +196,11 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	ev_svr.events = 0;
 	
 	switch(conn->state) {
-		case CT_SERVER_CONNECTING:
+		case S_SERVER_CONNECTING:
 			/* Wait for the server connection to establish. */
 			ev_svr.events = EPOLLOUT;
 			break;
-		case CT_SERVER_CONNECTED:
+		case S_FORWARDING:
 			/* Connection established, data forwarding in progress. */
 			if (!conn->request.dlen && !conn->response.dlen) {
 				ev_cli.events = EPOLLIN;
@@ -287,14 +287,14 @@ static void do_new_client_in(int lsn_sock, int epfd)
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		sizeof(conn->svr_addr))) == 0) {
 		/* Connected, prepare for data forwarding. */
-		conn->state = CT_SERVER_CONNECTED;
+		conn->state = S_FORWARDING;
 		set_conn_epoll_fds(conn, epfd);
 	} else if (errno == EINPROGRESS) {
 		/**
 		 * OK, the request does not fail right now, so wait
 		 *  for it completes.
 		 */
-		conn->state = CT_SERVER_CONNECTING;
+		conn->state = S_SERVER_CONNECTING;
 		set_conn_epoll_fds(conn, epfd);
 	} else {
 		/* Error occurs, drop the session. */
@@ -334,7 +334,7 @@ static void do_server_connected(struct proxy_conn *conn, int epfd)
 		return;
 	}
 	
-	conn->state = CT_SERVER_CONNECTED;
+	conn->state = S_FORWARDING;
 	set_conn_epoll_fds(conn, epfd);
 }
 
@@ -541,10 +541,10 @@ int main(int argc, char *argv[])
 			conn = get_conn_by_evptr(evptr);
 			
 			switch (conn->state) {
-				case CT_SERVER_CONNECTING:
+				case S_SERVER_CONNECTING:
 					do_server_connected(conn, epfd);
 					break;
-				case CT_SERVER_CONNECTED:
+				case S_FORWARDING:
 					do_forward_data(conn, epfd, evp, events + i + 1, nfds - 1 - i);
 					break;
 				default:
