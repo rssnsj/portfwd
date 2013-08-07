@@ -26,12 +26,12 @@ static unsigned short g_dest_port   = 0;
 
 static int do_daemonize(void)
 {
-	int ret;
+	int rc;
 	
-	if ((ret = fork()) < 0) {
+	if ((rc = fork()) < 0) {
 		fprintf(stderr, "*** fork() error: %s.", strerror(errno));
-		return ret;
-	} else if (ret > 0) {
+		return rc;
+	} else if (rc > 0) {
 		/* In parent process */
 		exit(0);
 	} else {
@@ -67,7 +67,9 @@ static int set_nonblock(int sfd)
 enum conn_state {
 	S_INVALID,
 	S_SERVER_CONNECTING,
+	S_SERVER_CONNECTED,
 	S_FORWARDING,
+	S_CLOSING,
 };
 
 enum ev_magic {
@@ -161,12 +163,17 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 	int i;
 	struct epoll_event *ev;
 	
-	for (i = 0; i < pending_fds; i++) {
-		ev = &pending_evs[i];
-		if (ev->data.ptr == &conn->ev_client ||
-			ev->data.ptr == &conn->ev_server) {
-			ev->data.ptr = NULL;
-			break;
+	/**
+	 * Clear probable fd events that might belong to
+	 *  current connection.
+	 */
+	if (conn->client_in_ep || conn->server_in_ep) {
+		for (i = 0; i < pending_fds; i++) {
+			if (ev->data.ptr == &conn->ev_client ||
+				ev->data.ptr == &conn->ev_server) {
+				ev->data.ptr = NULL;
+				break;
+			}
 		}
 	}
 	
@@ -243,9 +250,9 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	}
 }
 
-static void do_new_client_in(int lsn_sock, int epfd)
+static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 {
-	int cli_sock;
+	int cli_sock, svr_sock;
 	struct sockaddr_in cli_addr;
 	socklen_t cli_alen = sizeof(cli_addr);
 	struct proxy_conn *conn;
@@ -254,25 +261,30 @@ static void do_new_client_in(int lsn_sock, int epfd)
 	if (cli_sock < 0) {
 		/* FIXME: error indicated, need to exit? */
 		fprintf(stderr, "*** accept() failed: %s\n", strerror(errno));
-		return;
+		return NULL;
 	}
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
 		fprintf(stderr, "*** malloc(struct proxy_conn) error: %s\n",
 				strerror(errno));
 		close(cli_sock);
-		return;
+		return NULL;
 	}
 	conn->cli_sock = cli_sock;
 	conn->cli_addr = cli_addr;
 	
 	/* Initiate the connection to server right now. */
-	if ((conn->svr_sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
+	if ((svr_sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
 		fprintf(stderr, "*** socket(svr_sock) error: %s\n",
 				strerror(errno));
+		/**
+		 * 'conn' has only been used among this function,
+		 *  so don't need the caller to release anything.
+		 */
 		release_proxy_conn(conn, NULL, 0);
-		return;
+		return NULL;
 	}
+	conn->svr_sock = svr_sock;
 	set_nonblock(conn->svr_sock);
 	
 	/* Connect to server. */
@@ -287,23 +299,26 @@ static void do_new_client_in(int lsn_sock, int epfd)
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		sizeof(conn->svr_addr))) == 0) {
 		/* Connected, prepare for data forwarding. */
-		conn->state = S_FORWARDING;
-		set_conn_epoll_fds(conn, epfd);
+		conn->state = S_SERVER_CONNECTED;
+		*error = 0;
+		return conn;
 	} else if (errno == EINPROGRESS) {
 		/**
 		 * OK, the request does not fail right now, so wait
 		 *  for it completes.
 		 */
 		conn->state = S_SERVER_CONNECTING;
-		set_conn_epoll_fds(conn, epfd);
+		*error = EINPROGRESS;
+		return conn;
 	} else {
 		/* Error occurs, drop the session. */
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
 		release_proxy_conn(conn, NULL, 0);
+		return NULL;
 	}
 }
 
-static void do_server_connected(struct proxy_conn *conn, int epfd)
+static int server_connecting(struct proxy_conn *conn)
 {
 	/* The connection has established or failed. */
 	int err = 0;
@@ -312,16 +327,21 @@ static void do_server_connected(struct proxy_conn *conn, int epfd)
 	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err,
 		&errlen) < 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
-		release_proxy_conn(conn, NULL, 0);
-		return;
+		conn->state = S_CLOSING;
+		return EPERM;
 	}
-	/* Connected, prepare for data forwarding. */
 	if (err != 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
-		release_proxy_conn(conn, NULL, 0);
-		return;
+		conn->state = S_CLOSING;
+		return EPERM;
 	}
-	
+	/* Connected, preparing for data forwarding. */
+	conn->state = S_SERVER_CONNECTED;
+	return 0;
+}
+
+static int server_connected(struct proxy_conn *conn)
+{
 	/* Allocate both buffers. */
 	conn->request.size = REQ_BUFFER_SIZE;
 	conn->response.size = RSP_BUFFER_SIZE;
@@ -330,21 +350,26 @@ static void do_server_connected(struct proxy_conn *conn, int epfd)
 	if (!conn->request.buf || !conn->response.buf) {
 		fprintf(stderr, "*** Failed to allocate either request "
 				"or response buffers.\n");
-		release_proxy_conn(conn, NULL, 0);
-		return;
+		conn->state = S_CLOSING;
+		return EPERM;
 	}
 	
-	conn->state = S_FORWARDING;
-	set_conn_epoll_fds(conn, epfd);
+	if (0) {
+		/* FIXME: SOCKS request. */
+	} else {
+		/* Direct access. */
+		conn->state = S_FORWARDING;
+	}
+	return EAGAIN;
 }
 
-static void do_forward_data(struct proxy_conn *conn, int epfd,
+static int forward_data(struct proxy_conn *conn, int epfd,
 		struct epoll_event *ev, struct epoll_event *pending_evs,
 		int pending_fds)
 {
 	int *evptr = (int *)ev->data.ptr;
 	struct buffer_info *rxb, *txb;
-	int efd, ret;
+	int efd, rc;
 	
 	if (*evptr == EV_MAGIC_CLIENT) {
 		efd = conn->cli_sock;
@@ -357,29 +382,29 @@ static void do_forward_data(struct proxy_conn *conn, int epfd,
 	}
 	
 	if (ev->events & EPOLLIN) {
-		if ((ret = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
+		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
-			release_proxy_conn(conn, pending_evs, pending_fds);
-			return;
+			conn->state = S_CLOSING;
+			return EPERM;
 		}
-		rxb->dlen = (unsigned)ret;
+		rxb->dlen = (unsigned)rc;
 	}
 	
 	if (ev->events & EPOLLOUT) {
-		if ((ret = send(efd, txb->buf + txb->rpos,
+		if ((rc = send(efd, txb->buf + txb->rpos,
 			txb->dlen - txb->rpos, 0)) <= 0) {
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
-			release_proxy_conn(conn, pending_evs, pending_fds);
-			return;
+			conn->state = S_CLOSING;
+			return EPERM;
 		}
-		txb->rpos += ret;
+		txb->rpos += rc;
 		if (txb->rpos >= txb->dlen)
 			txb->rpos = txb->dlen = 0;
 	}
 	
-	set_conn_epoll_fds(conn, epfd);
+	return EAGAIN;
 }
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
@@ -396,7 +421,6 @@ static void show_help(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
 	int lsn_sock;
-	int ev_magic_listener = EV_MAGIC_LISTENER;
 	struct sockaddr_in lsn_addr;
 	int b_reuse = 1;
 	int opt;
@@ -408,6 +432,7 @@ int main(int argc, char *argv[])
 #define MAX_POLL_EVENTS 100
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
+	int ev_magic_listener = EV_MAGIC_LISTENER;
 
 	while ((opt = getopt(argc, argv, "dh")) != -1) {
 		switch (opt) {
@@ -487,7 +512,7 @@ int main(int argc, char *argv[])
 
 	set_nonblock(lsn_sock);
 	
-	printf("TCP proxy %s:%d -> %s:%d started, \n",
+	printf("TCP proxy %s:%d -> %s:%d started \n",
 		   s_lsn_ip, lsn_port, s_dst_ip, dst_port);
 
 	/* Create epoll table. */
@@ -527,6 +552,7 @@ int main(int argc, char *argv[])
 			struct epoll_event *evp = &events[i];
 			int *evptr = (int *)evp->data.ptr;
 			struct proxy_conn *conn;
+			int rc = 0;
 			
 			/* NULL evp->data.ptr indicates this socket is closed. */
 			if (evptr == NULL)
@@ -534,27 +560,44 @@ int main(int argc, char *argv[])
 			
 			if (*evptr == EV_MAGIC_LISTENER) {
 				/* A new connection calls in. */
-				do_new_client_in(lsn_sock, epfd);
-				continue;
+				rc = -1;
+				if (!(conn = accept_and_connect(lsn_sock, &rc)))
+					continue;
+			} else {
+				conn = get_conn_by_evptr(evptr);
 			}
 			
-			conn = get_conn_by_evptr(evptr);
-			
-			switch (conn->state) {
+			/**
+			 * 1. rc == 0 means I/O completes, can be treated in current epoll round;
+			 *    rc != 0 means I/O inprogress, cannot be treated in this round.
+			 * 2. If conn->state == S_CLOSING, close it.
+			 */
+			while(rc == 0) {
+				switch (conn->state) {
 				case S_SERVER_CONNECTING:
-					do_server_connected(conn, epfd);
+					rc = server_connecting(conn);
+					break;
+				case S_SERVER_CONNECTED:
+					rc = server_connected(conn);
 					break;
 				case S_FORWARDING:
-					do_forward_data(conn, epfd, evp, events + i + 1, nfds - 1 - i);
+					rc = forward_data(conn, epfd, evp, events + i + 1, nfds - 1 - i);
 					break;
 				default:
 					fprintf(stderr, "*** Undefined state: %d\n", conn->state);
-					release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
+					conn->state = S_CLOSING;
+					rc = EPERM;
 					break;
+				}
+			}
+			if (conn->state == S_CLOSING) {
+				release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
+			} else {
+				set_conn_epoll_fds(conn, epfd);
 			}
 		}
 	}
-	
+
 	return 0;
 }
 
