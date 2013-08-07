@@ -272,6 +272,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 		return NULL;
 	}
 	conn->cli_sock = cli_sock;
+	set_nonblock(conn->cli_sock);
 	conn->cli_addr = cli_addr;
 	
 	/* Initiate the connection to server right now. */
