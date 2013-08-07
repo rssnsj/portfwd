@@ -4,8 +4,10 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
+#include <assert.h>
+#include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -19,17 +21,15 @@
 
 static unsigned int   g_tcp_proxy_ip   = 0;
 static unsigned short g_tcp_proxy_port = 7070;
-static int            g_socks_version  = 5;
-static int            g_recv_timeout   = 10; 
 
 static int do_daemonize(void)
 {
-	int ret;
+	int rc;
 	
-	if ((ret = fork()) < 0) {
+	if ((rc = fork()) < 0) {
 		fprintf(stderr, "*** fork() error: %s.", strerror(errno));
-		return ret;
-	} else if (ret > 0) {
+		return rc;
+	} else if (rc > 0) {
 		/* In parent process */
 		exit(0);
 	} else {
@@ -55,359 +55,579 @@ static int set_nonblock(int sfd)
 	return 0;
 }
 
-/* SOCKS protocol constants. */
-#define SOCKS_V5	5
-#define SOCKS_V4	4
-#define SOCKS_NOAUTH	0
-#define SOCKS_NOMETHOD	0xff
-#define SOCKS_CONNECT	1
-#define SOCKS_IPV4	1
-#define SOCKS_DOMAIN	3
-#define SOCKS_IPV6	4
+enum proxy_type {
+	PROXY_NONE,
+	PROXY_SOCKS4,
+	PROXY_SOCKS5,
+};
+
+void dumphex(void *p, unsigned len)
+{
+	unsigned char *__p = p;
+	for (; len; len--)
+		printf("%02x ", (unsigned)*(__p++));
+	printf("\n");
+}
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+
+/* Statues indicators of proxy sessions. */
+enum conn_state {
+	S_INVALID,
+	S_SERVER_CONNECTING,
+	S_SERVER_CONNECTED,
+	S_SERVER_SENDING,
+	S_SERVER_RECEIVING,
+	S_SENTV4REQ,
+	S_GOTV4REQ,
+	S_SENTV5METHOD,
+	S_GOTV5METHOD,
+	S_SENTV5CONNECT,
+	S_GOTV5CONNECT,
+	S_FORWARDING,
+	S_CLOSING,
+};
+
+enum ev_magic {
+	EV_MAGIC_LISTENER = 0x1010,
+	EV_MAGIC_CLIENT = 0x2010,
+	EV_MAGIC_SERVER = 0x3020,
+};
+
+struct buffer_info {
+	char *buf;
+	unsigned rpos;
+	unsigned dlen;
+	unsigned size;
+};
+
+#define REQ_BUFFER_SIZE 8192
+#define RSP_BUFFER_SIZE 8192
 
 /**
- * x_recv_n - wrapper of 'recv', wait until the specified
- *  length of data was received.
+ * Connection tracking information to indicate
+ *  a proxy session.
  */
-static int x_recv_n(int sockfd, void *buff, int len, int flags,
-					int timeo_sec)
-{
-	char *buf = (char *)buff;
-	fd_set rset;
-	int ret;
-	int rlen;
-	struct timeval tv;
+struct proxy_conn {
+	int cli_sock;
+	int svr_sock;
 
-	for (rlen = 0; rlen < len; ) {
-		FD_ZERO(&rset);
-		FD_SET(sockfd, &rset);
-		if (timeo_sec) {
-			tv.tv_sec = timeo_sec;
-			tv.tv_usec = 0;
-			ret = select(sockfd + 1, &rset, NULL, NULL, &tv);
-		} else {
-			ret = select(sockfd + 1, &rset, NULL, NULL, NULL);
-		}
-		if (ret < 0) {
-			return -1;
-		} else if (ret == 0) {
-			return -1;
-		}
-		if (FD_ISSET(sockfd, &rset)) {
-			ret = recv(sockfd, buf + rlen, len - rlen, flags);
-			if (ret <= 0)
-				return -1;
-			rlen += ret;
+	/**
+	 * The two fields are used when an epoll event occur,
+	 *  to know on which socket fd it is triggered,
+	 *  client or server.
+	 *  ev.data.ptr = &ct.ev_client;
+	 */
+	int ev_client;
+	int ev_server;
+	unsigned short state;
+	unsigned short next_state;
+	unsigned short proxy_type;
+
+	/* Memorize the session addresses. */
+	struct sockaddr_in cli_addr;
+	struct sockaddr_in orig_dst;
+
+	/* To know if the fds are already added to epoll. */
+	bool client_in_ep;
+	bool server_in_ep;
+
+	/* Buffers for both direction. */
+	struct buffer_info request;
+	struct buffer_info response;
+};
+
+/**
+ * Get 'conn' structure by passing the ev.data.ptr
+ * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
+ *  or EV_MAGIC_SERVER.
+ */
+static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
+{
+	if (*evptr == EV_MAGIC_CLIENT)
+		return container_of(evptr, struct proxy_conn, ev_client);
+	else if (*evptr == EV_MAGIC_SERVER)
+		return container_of(evptr, struct proxy_conn, ev_server);
+	else
+		assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
+	return NULL;
+}
+
+static inline void reset_conn_buffers(struct proxy_conn *conn)
+{
+	conn->request.rpos = conn->request.dlen = 0;
+	conn->response.rpos = conn->response.dlen = 0;
+}
+
+static inline struct proxy_conn *alloc_proxy_conn(void)
+{
+	struct proxy_conn *conn;
+
+	if (!(conn = malloc(sizeof(*conn))))
+		return NULL;
+	memset(conn, 0x0, sizeof(*conn));
+	conn->cli_sock = -1;
+	conn->svr_sock = -1;
+	conn->ev_client = EV_MAGIC_CLIENT;
+	conn->ev_server = EV_MAGIC_SERVER;
+	conn->state = -1;
+	conn->client_in_ep = false;
+	conn->server_in_ep = false;
+
+	return conn;
+}
+
+/**
+ * Close both sockets of the connection and remove it
+ *  from the current ready list.
+ */
+static inline void release_proxy_conn(struct proxy_conn *conn,
+		struct epoll_event *pending_evs, int pending_fds)
+{
+	int i;
+	struct epoll_event *ev;
+	
+	/**
+	 * Clear probable fd events that might belong to
+	 *  current connection.
+	 */
+	if (conn->client_in_ep || conn->server_in_ep) {
+		for (i = 0; i < pending_fds; i++) {
+			ev = &pending_evs[i];
+			if (ev->data.ptr == &conn->ev_client ||
+				ev->data.ptr == &conn->ev_server) {
+				ev->data.ptr = NULL;
+				break;
+			}
 		}
 	}
-	return rlen;
+	
+	if (conn->cli_sock >= 0)
+		close(conn->cli_sock);
+	if (conn->svr_sock >= 0)
+		close(conn->svr_sock);
+	
+	if (conn->request.buf)
+		free(conn->request.buf);
+	if (conn->response.buf)
+		free(conn->response.buf);
+	
+	free(conn);
 }
 
 /**
- * x_send_n - wrapper of 'send'.
+ * Add or activate the epoll fds according to the status of
+ *  'conn'. Different conn->state and buffer status will
+ *  affect the polling behaviors.
  */
-static int x_send_n(int sockfd, void *buff, int len, int flags)
+static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 {
-	return send(sockfd, (const char *)buff, len, flags);
+	struct epoll_event ev_cli, ev_svr;
+	
+	ev_cli.events = 0;
+	ev_svr.events = 0;
+	
+	switch(conn->state) {
+		case S_FORWARDING:
+			/* Connection established, data forwarding in progress. */
+			if (!conn->request.dlen && !conn->response.dlen) {
+				ev_cli.events = EPOLLIN;
+				ev_svr.events = EPOLLIN;
+			} else if (conn->request.dlen && !conn->response.dlen) {
+				ev_svr.events = EPOLLIN | EPOLLOUT;
+			} else if (!conn->request.dlen && conn->response.dlen) {
+				ev_cli.events = EPOLLIN | EPOLLOUT;
+			} else {
+				ev_cli.events = EPOLLOUT;
+				ev_svr.events = EPOLLOUT;
+			}
+			break;
+		case S_SERVER_CONNECTING:
+		case S_SERVER_SENDING:
+			ev_svr.events = EPOLLOUT;
+			break;
+		case S_SERVER_RECEIVING:
+			ev_svr.events = EPOLLIN;
+			break;
+	}
+	
+	if (ev_cli.events) {
+		ev_cli.data.ptr = &conn->ev_client;
+		if (conn->client_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev_cli); /* FIXME: result */
+		else
+			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev_cli);
+		conn->client_in_ep = true;
+	} else {
+		if (conn->client_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->cli_sock, NULL);
+		conn->client_in_ep = false;
+	}
+	
+	if (ev_svr.events) {
+		ev_svr.data.ptr = &conn->ev_server;
+		if (conn->server_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev_svr);
+		else
+			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev_svr);
+		conn->server_in_ep = true;
+	} else {
+		if (conn->server_in_ep)
+			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
+		conn->server_in_ep = false;
+	}
 }
 
-
-/**
- * my_connect - select a proxy and use it to connect to real server
- * parameters:
- *  @sfd: socket descriptor
- *  @svr_addr: IPv4 address of real server
- *  @svr_alen: address length
- * return value: compatible with 'connect()'.
- */
-static int my_connect(int sfd, const struct sockaddr *svr_addr,
-					  socklen_t svr_alen)
+static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 {
-	struct sockaddr_in ss_svr_addr;
-	const struct sockaddr_in *svr_sa =
-			(const struct sockaddr_in *)svr_addr;
-	unsigned char buf[1024];
+	int cli_sock, svr_sock;
+	struct sockaddr_in cli_addr, orig_dst, svr_addr;
+	socklen_t cli_alen = sizeof(cli_addr),
+			orig_alen = sizeof(orig_dst);
+	struct proxy_conn *conn;
 	struct proxy_server *ps;
-	int ret;
-	
-	/* We only support IPv4, refuse other protocol types. */
-	if (svr_sa->sin_family != AF_INET) {
-		errno = EADDRNOTAVAIL;
-		return -1;
+
+	cli_sock = accept(lsn_sock, (struct sockaddr *)&cli_addr, &cli_alen);
+	if (cli_sock < 0) {
+		/* FIXME: error indicated, need to exit? */
+		fprintf(stderr, "*** accept() failed: %s\n", strerror(errno));
+		return NULL;
 	}
 	
-	/* If we find a matched rule, use it for proxy. */
-	ps = get_socks_server_by_ip(
-		ntohl(((struct sockaddr_in *)svr_addr)->sin_addr.s_addr));
+	/* Client calls in, allocate session data for it. */
+	if (!(conn = alloc_proxy_conn())) {
+		fprintf(stderr, "*** malloc(struct proxy_conn) error: %s\n",
+				strerror(errno));
+		close(cli_sock);
+		return NULL;
+	}
+	conn->cli_sock = cli_sock;
+	set_nonblock(conn->cli_sock);
+	conn->cli_addr = cli_addr;
+	
+	/* Get the original dest address before DNAT translation. */
+	if (getsockopt(conn->cli_sock, SOL_IP, SO_ORIGINAL_DST,
+		(struct sockaddr_in *)&orig_dst, &orig_alen)) {
+		fprintf(stderr, "*** getsockopt(SO_ORIGINAL_DST) failed: %s.\n",
+				strerror(errno));
+		release_proxy_conn(conn, NULL, 0);
+		return NULL;
+	}
+	conn->orig_dst = orig_dst;
+	/**
+	 * FIXME: Check if destination address equals the
+	 *  listening address. Refuse the operation if so.
+	 */
+	
+	printf("-- Client %s:%d entered, ", inet_ntoa(conn->cli_addr.sin_addr),
+		ntohs(conn->cli_addr.sin_port));
+	
+	/* Select a proxy server to connect to the real server. */
+	ps = get_socks_server_by_ip(ntohl(orig_dst.sin_addr.s_addr));
 	if (!ps) {
 		/* No matching rule, use local network. */
-		return connect(sfd, svr_addr, svr_alen);
+		conn->proxy_type = PROXY_NONE;
+		svr_addr = orig_dst;
+		printf("using local network\n");
 	} else if (ps->server_sa.sin_addr.s_addr == 0 &&
 			ps->server_sa.sin_port == 0) {
 		/* Explicitly defined 'none', use local network. */
-		return connect(sfd, svr_addr, svr_alen);
-	}
-	
-	/* Connect to SOCKS server. */
-	ss_svr_addr = ps->server_sa;
-	
-	ret = connect(sfd, (struct sockaddr *)&ss_svr_addr, sizeof(ss_svr_addr));
-	if (ret < 0) {
-		errno = ENETUNREACH;
-		return ret;
-	}
-
-	if (g_socks_version == 5) {
-		/* Version 5, one method: no authentication */
-		buf[0] = SOCKS_V5;
-		buf[1] = 1;
-		buf[2] = SOCKS_NOAUTH;
-		if (x_send_n(sfd, buf, 3, 0) != 3) {
-			//fprintf(stderr, "*** [%s:%d] x_send_n() failed.\n",
-			//		__FUNCTION__, __LINE__);
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		/* Receive and check the response. */
-		if (x_recv_n(sfd, buf, 2, 0, g_recv_timeout) != 2) {
-			//fprintf(stderr, "*** [%s:%d] x_recv_n() failed.\n",
-			//		__FUNCTION__, __LINE__);
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		if (buf[1] == SOCKS_NOMETHOD) {
-			fprintf(stderr, "*** Authentication method negotiation failed.\n");
-			errno = ECONNREFUSED;
-			return -1;
-		}
-
-		/* Conduct the 'connect' request. */
-		buf[0] = SOCKS_V5;
-		buf[1] = SOCKS_CONNECT;
-		buf[2] = 0;
-		buf[3] = SOCKS_IPV4;
-		memcpy(buf + 4, &svr_sa->sin_addr, 4);
-		memcpy(buf + 8, &svr_sa->sin_port, 2);
-		/* FIXME: data length is 10. */
-		if (x_send_n(sfd, buf, 10, 0) != 10) {
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		if (x_recv_n(sfd, buf, 4, 0, g_recv_timeout) != 4) {
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		if (buf[1] != 0) {
-			fprintf(stderr, "*** SOCKS handshake failed, SOCKS error %d.\n", buf[1]);
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		switch (buf[3]) {
-		case SOCKS_IPV4:
-			if (x_recv_n(sfd, buf + 4, 6, 0, g_recv_timeout) != 6) {
-				errno = ECONNREFUSED;
-				return -1;
-			}
-			break;
-		case SOCKS_IPV6:
-			if (x_recv_n(sfd, buf + 4, 18, 0, g_recv_timeout) != 6) {
-				errno = ECONNREFUSED;
-				return -1;
-			}
-			break;
-		default:
-			fprintf(stderr, "*** Unsupported address type '%d' from server.\n", buf[3]);
-			errno = ECONNREFUSED;
-			return -1;
-		}
-	} else if (g_socks_version == 4) {
-		/* SOCKS4 is quite simple, only a 'CONNECT' handshake. */
-		buf[0] = SOCKS_V4;
-		buf[1] = SOCKS_CONNECT;
-		memcpy(buf + 2, &svr_sa->sin_port, 2);
-		memcpy(buf + 4, &svr_sa->sin_addr, 4);
-		buf[8] = 0;	/* empty username */
-		if (x_send_n(sfd, buf, 9, 0) != 9) {
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		if (x_recv_n(sfd, buf, 8, 0, g_recv_timeout) != 8) {
-			errno = ECONNREFUSED;
-			return -1;
-		}
-		if (buf[1] != 90) {
-			errno = ECONNREFUSED;
-			return -1;
-		}
+		conn->proxy_type = PROXY_NONE;
+		svr_addr = orig_dst;
+		printf("using local network\n");
 	} else {
-		fprintf(stderr, "*** Unsupported SOCKS version '%d'.\n", g_socks_version);
-		errno = EINVAL;
-		return -1;
+		/* Use SOCKS5 proxy. */
+		conn->proxy_type = PROXY_SOCKS5;
+		svr_addr = ps->server_sa;
+		printf("using proxy %s:%d\n", inet_ntoa(svr_addr.sin_addr),
+			ntohs(svr_addr.sin_port));
 	}
+	
+	/* Initiate the connection to server right now. */
+	if ((svr_sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
+		fprintf(stderr, "*** socket(svr_sock) error: %s\n",
+				strerror(errno));
+		/**
+		 * 'conn' has only been used among this function,
+		 *  so don't need the caller to release anything.
+		 */
+		release_proxy_conn(conn, NULL, 0);
+		return NULL;
+	}
+	conn->svr_sock = svr_sock;
+	set_nonblock(conn->svr_sock);
+	
+	/* Connect to server. */
+	if ((connect(conn->svr_sock, (struct sockaddr *)&svr_addr,
+		sizeof(svr_addr))) == 0) {
+		/* Connected, prepare for data forwarding. */
+		conn->state = S_SERVER_CONNECTED;
+		*error = 0;
+		return conn;
+	} else if (errno == EINPROGRESS) {
+		/**
+		 * OK, the request does not fail right now, so wait
+		 *  for it completes.
+		 */
+		conn->state = S_SERVER_CONNECTING;
+		*error = EINPROGRESS;
+		return conn;
+	} else {
+		/* Error occurs, drop the session. */
+		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
+		release_proxy_conn(conn, NULL, 0);
+		return NULL;
+	}
+}
 
-	/* OK, now the connection is ready for send() & recv(). */
+static int server_connecting(struct proxy_conn *conn)
+{
+	/* The connection has established or failed. */
+	int err = 0;
+	socklen_t errlen = sizeof(err);
+	
+	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err,
+		&errlen) < 0) {
+		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
+		conn->state = S_CLOSING;
+		return ECONNABORTED;
+	}
+	if (err != 0) {
+		fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
+		conn->state = S_CLOSING;
+		return ECONNABORTED;
+	}
+	/* Connected, preparing for data forwarding. */
+	conn->state = S_SERVER_CONNECTED;
 	return 0;
 }
 
-
-static void *conn_thread(void *arg)
+static int server_connected(struct proxy_conn *conn)
 {
-	int cli_sock = (int)(long)arg;
-	int svr_sock;
-	struct sockaddr_in loc_addr, cli_addr, orig_dst;
-	socklen_t loc_alen = sizeof(loc_addr),
-			  cli_alen = sizeof(cli_addr),
-			  orig_alen = sizeof(orig_dst);
-	//struct ct_query_req ct_req;
-	fd_set rset, wset;
-	int maxfd;
-	char req_buf[1024 * 4], rsp_buf[1024 * 4];
-	const size_t req_buf_sz = sizeof(req_buf),
-				 rsp_buf_sz = sizeof(rsp_buf);
-	size_t req_dlen = 0, rsp_dlen = 0,
-		   req_rpos = 0, rsp_rpos = 0;
-	/* dotted addresses for displaying */
-	char s_src_addr[20], s_dst_addr[20];
-	int ret;
+	/* Allocate both buffers. */
+	conn->request.size = REQ_BUFFER_SIZE;
+	conn->response.size = RSP_BUFFER_SIZE;
+	conn->request.buf = (char *)malloc(conn->request.size);
+	conn->response.buf = (char *)malloc(conn->response.size);
+	if (!conn->request.buf || !conn->response.buf) {
+		fprintf(stderr, "*** Failed to allocate either request "
+				"or response buffers.\n");
+		conn->state = S_CLOSING;
+		return ECONNABORTED;
+	}
+	
+	if (conn->proxy_type == PROXY_NONE) {
+		/* Direct access, the next state is FORWARDING. */
+		conn->state = S_FORWARDING;
+		return EWOULDBLOCK;
+	} else if (conn->proxy_type == PROXY_SOCKS5) {
+		char verstring[] = { 0x05,    /* Version 5 SOCKS */
+							 0x01,    /* Number of Methods     */
+							 0x00,    /* Null Auth       */
+							/*0x02*/ };  /* User/Pass Auth  */
+		memcpy(conn->request.buf, verstring, sizeof(verstring));
+		conn->request.dlen = sizeof(verstring);
+		conn->request.rpos = 0;
+		conn->state = S_SERVER_SENDING;
+		conn->next_state = S_SENTV5METHOD;
+		/* Assume I/O ready now, try to send in the same epoll round. */
+		return 0;
+	} else if (conn->proxy_type == PROXY_SOCKS4) {
+		/* FIXME: Implement it */
+		conn->state = S_CLOSING;
+		return EINVAL;
+	} else {
+		fprintf(stderr, "*** Unknown proxy type: %u\n", conn->proxy_type);
+		conn->state = S_CLOSING;
+		return EINVAL;
+	}
+}
 
-	/* Get current session addresses. */
-	if (getsockname(cli_sock, (struct sockaddr *)&loc_addr,
-		&loc_alen) < 0) {
-		fprintf(stderr, "*** getsockname() failed: %s.\n",
-				strerror(errno));
-		goto out1;
+static int server_send_buffer(struct proxy_conn *conn)
+{
+	int rc = 0;
+	
+	for (;;) {
+		rc = send(conn->svr_sock, conn->request.buf + conn->request.rpos,
+				  conn->request.dlen - conn->request.rpos, 0);
+		if (rc > 0) {
+			conn->request.rpos += rc;
+			if (conn->request.rpos >= conn->request.dlen) {
+				/* Sent the full buffer, return */
+				conn->state = conn->next_state;
+				return 0;
+			}
+			/* Continue to try */
+		} else if (rc == 0) {
+			fprintf(stderr, "*** [%s] Connection closed unexpectedly.\n",
+					__FUNCTION__);
+			conn->state = S_CLOSING;
+			return ECONNABORTED;
+		} else if (errno == EWOULDBLOCK && errno == EAGAIN) {
+			/* I/O not ready, handle in next event. */
+			return errno;
+		} else {
+			fprintf(stderr, "*** [%s] Unexpected error: %s\n",
+					__FUNCTION__, strerror(errno));
+			conn->state = S_CLOSING;
+			return ECONNABORTED;
+		}
 	}
-	if (getpeername(cli_sock, (struct sockaddr *)&cli_addr,
-		&cli_alen) < 0) {
-		fprintf(stderr, "*** getpeername() failed: %s.\n",
-				strerror(errno));
-		goto out1;
-	}
+	
+	/* Won't reach here */
+	return -1;
+}
 
-	/* Get the original destination address before translated by Netfiter. */
-	ret = getsockopt(cli_sock, SOL_IP, SO_ORIGINAL_DST,
-				(struct sockaddr_in *)&orig_dst, &orig_alen);
-	if (ret) {
-		fprintf(stderr, "*** getsockopt(SOL_IP) failed: %s.\n",
-				strerror(errno));
-		goto out1;
-	}
-
-	strcpy(s_src_addr, inet_ntoa(cli_addr.sin_addr));
-	strcpy(s_dst_addr, inet_ntoa(orig_dst.sin_addr));
-	printf("-- Client %s:%d entered, to %s:%d.\n",
-		s_src_addr, ntohs(cli_addr.sin_port),
-		s_dst_addr, ntohs(orig_dst.sin_port));
-
-	/*
-	 * Drop connections whose original target address is same
-	 *  as the translated one.
-	 */
-	if (loc_addr.sin_addr.s_addr == orig_dst.sin_addr.s_addr &&
-		loc_addr.sin_port == orig_dst.sin_port) {
-		fprintf(stderr, "*** The requested address may cause loop, drop it.\n");
-		goto out1;
-	}
-
-	/* Connect to real target address. */
-	svr_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (svr_sock < 0) {
-		fprintf(stderr, "*** socket() failed: %s.\n", strerror(errno));
-		goto out1;
-	}
-
-	if (my_connect(svr_sock, (struct sockaddr *)&orig_dst,
-		sizeof(orig_dst)) < 0) {
-		fprintf(stderr, "*** Connection to '%s:%d' failed: %s.\n",
-				inet_ntoa(orig_dst.sin_addr), ntohs(orig_dst.sin_port),
-				strerror(errno));
-		goto out2;
-	}
-
-	/* Set non-blocking. */
-	if (set_nonblock(cli_sock) < 0) {
-		fprintf(stderr, "*** set_nonblock(cli_sock) failed: %s.",
-				strerror(errno));
-		goto out2;
-	}
-	if (set_nonblock(svr_sock) < 0) {
-		fprintf(stderr, "*** set_nonblock(svr_sock) failed: %s.",
-				strerror(errno));
-		goto out2;
-	}
+static int server_recv_buffer(struct proxy_conn *conn)
+{
+	int rc = 0;
 
 	for (;;) {
-		FD_ZERO(&rset);
-		FD_ZERO(&wset);
-		maxfd = 0;
-
-		if (!req_dlen && !rsp_dlen) {
-			FD_SET(cli_sock, &rset);
-			FD_SET(svr_sock, &rset);
-			maxfd = svr_sock > cli_sock ? svr_sock : cli_sock;
-		} else if (req_dlen && !rsp_dlen) {
-			FD_SET(svr_sock, &rset);
-			FD_SET(svr_sock, &wset);
-			maxfd = svr_sock;
-		} else if (!req_dlen && rsp_dlen) {
-			FD_SET(cli_sock, &rset);
-			FD_SET(cli_sock, &wset);
-			maxfd = cli_sock;
+		rc = recv(conn->svr_sock, conn->request.buf + conn->request.rpos,
+				  conn->request.dlen - conn->request.rpos, 0);
+		if (rc > 0) {
+			conn->request.rpos += rc;
+			if (conn->request.rpos >= conn->request.dlen) {
+				/* Received the full size, return */
+				conn->state = conn->next_state;
+				return 0;
+			}
+			/* Continue to try */
+		} else if (rc == 0) {
+			fprintf(stderr, "*** [%s] Connection closed unexpectedly.\n",
+					__FUNCTION__);
+			conn->state = S_CLOSING;
+			return ECONNABORTED;
+		} else if (errno == EWOULDBLOCK && errno == EAGAIN) {
+			/* I/O not ready, handle in next event. */
+			return errno;
 		} else {
-			FD_SET(cli_sock, &wset);
-			FD_SET(svr_sock, &wset);
-			maxfd = svr_sock > cli_sock ? svr_sock : cli_sock;
-		}
-
-		ret = select(maxfd + 1, &rset, &wset, NULL, NULL);
-		if (ret < 0) {
-			break;
-		} else if (ret == 0) {
-			break;
-		}
-
-		if (FD_ISSET(svr_sock, &wset)) {
-			if ((ret = send(svr_sock, req_buf + req_rpos, req_dlen - req_rpos, 0)) <= 0) {
-				break;
-			}
-			req_rpos += ret;
-			if (req_rpos >= req_dlen) {
-				req_dlen = req_rpos = 0;
-			}
-		}
-
-		if (FD_ISSET(svr_sock, &rset)) {
-			if ((rsp_dlen = recv(svr_sock, rsp_buf, rsp_buf_sz, 0)) <= 0) {
-				break;
-			}
-		}
-
-		if (FD_ISSET(cli_sock, &rset)) {
-			if ((req_dlen = recv(cli_sock, req_buf, req_buf_sz, 0)) <= 0) {
-				break;
-			}
-		}
-
-		if (FD_ISSET(cli_sock, &wset)) {
-			if ((ret = send(cli_sock, rsp_buf + rsp_rpos, rsp_dlen - rsp_rpos, 0)) <= 0) {
-				break;
-			}
-			rsp_rpos += ret;
-			if (rsp_rpos >= req_dlen) {
-				rsp_dlen = rsp_rpos = 0;
-			}
+			fprintf(stderr, "*** [%s] Unexpected error: %s\n",
+					__FUNCTION__, strerror(errno));
+			conn->state = S_CLOSING;
+			return ECONNABORTED;
 		}
 	}
-
-	printf("-- Client %s:%d exited.\n",
-		inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
-
-out2:
-	close(svr_sock);
-out1:
-	close(cli_sock);
-	return NULL;
+	
+	/* Won't reach here */
+	return -1;
 }
+
+static int read_socksv5_method(struct proxy_conn *conn)
+{
+	char constring[] = { 0x05,    /* Version 5 SOCKS */
+						 0x01,    /* Connect request */
+						 0x00,    /* Reserved        */
+						 0x01 };  /* IP Version 4    */
+	
+	if ((unsigned char)conn->request.buf[1] == 0xff) {
+		fprintf(stderr, "*** SOCKS5 method negotiation failed.\n");
+		conn->state = S_CLOSING;
+		return ECONNREFUSED;
+	}
+	
+	/* OK, send the CONNECT request. */
+	memcpy(conn->request.buf, constring, sizeof(constring));
+	conn->request.dlen = sizeof(constring);
+	memcpy(conn->request.buf + conn->request.dlen,
+			&conn->orig_dst.sin_addr.s_addr, 4);
+	conn->request.dlen += 4;
+	memcpy(conn->request.buf + conn->request.dlen,
+			&conn->orig_dst.sin_port, 2);
+	conn->request.dlen += 2;
+	conn->request.rpos = 0;
+	/* Total: 10 bytes */
+	
+	conn->state = S_SERVER_SENDING;
+	conn->next_state = S_SENTV5CONNECT;
+	return 0;
+}
+
+static int read_socksv5_connect(struct proxy_conn *conn)
+{
+	if ((unsigned char)conn->request.buf[1] != 0x00) {
+		fprintf(stderr, "*** SOCKS V5 connect failed: ");
+		conn->state = S_CLOSING;
+		switch ((unsigned char)conn->request.buf[1]) {
+			case 1:
+				fprintf(stderr, "General SOCKS server failure\n");
+				return ECONNABORTED;
+			case 2:
+				fprintf(stderr, "Connection denied by rule\n");
+				return ECONNABORTED;
+			case 3:
+				fprintf(stderr, "Network unreachable\n");
+				return ENETUNREACH;
+			case 4:
+				fprintf(stderr, "Host unreachable\n");
+				return EHOSTUNREACH;
+			case 5:
+				fprintf(stderr, "Connection refused\n");
+				return ECONNREFUSED;
+			case 6: 
+				fprintf(stderr, "TTL Expired\n");
+				return ETIMEDOUT;
+			case 7:
+				fprintf(stderr, "Command not supported\n");
+				return ECONNABORTED;
+			case 8:
+				fprintf(stderr, "Address type not supported\n");
+				return ECONNABORTED;
+			default:
+				fprintf(stderr, "Unknown error\n");
+				return ECONNABORTED;
+		}
+	}
+	
+	reset_conn_buffers(conn);
+	conn->state = S_FORWARDING;
+	return EWOULDBLOCK;
+}
+
+static int forward_data(struct proxy_conn *conn, int epfd,
+		struct epoll_event *ev)
+{
+	int *evptr = (int *)ev->data.ptr;
+	struct buffer_info *rxb, *txb;
+	int efd, rc;
+	
+	if (*evptr == EV_MAGIC_CLIENT) {
+		efd = conn->cli_sock;
+		rxb = &conn->request;
+		txb = &conn->response;
+	} else {
+		efd = conn->svr_sock;
+		rxb = &conn->response;
+		txb = &conn->request;
+	}
+	
+	if (ev->events & EPOLLIN) {
+		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
+			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
+				ntohs(conn->cli_addr.sin_port));
+			conn->state = S_CLOSING;
+			return ECONNABORTED;
+		}
+		rxb->dlen = (unsigned)rc;
+	}
+	
+	if (ev->events & EPOLLOUT) {
+		if ((rc = send(efd, txb->buf + txb->rpos,
+			txb->dlen - txb->rpos, 0)) <= 0) {
+			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
+				ntohs(conn->cli_addr.sin_port));
+			conn->state = S_CLOSING;
+			return ECONNABORTED;
+		}
+		txb->rpos += rc;
+		if (txb->rpos >= txb->dlen)
+			txb->rpos = txb->dlen = 0;
+	}
+	
+	return EWOULDBLOCK;
+}
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static void show_help(int argc, char *argv[])
 {
@@ -421,12 +641,18 @@ static void show_help(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-	int lsn_sock, cli_sock;
+	int lsn_sock;
 	struct sockaddr_in lsn_addr;
 	int b_reuse = 1;
 	int opt;
 	bool is_daemon = false;
 	struct rlimit rlim;
+	int epfd;
+#define EPOLL_TABLE_SIZE 2048
+#define MAX_POLL_EVENTS 100
+	struct epoll_event ev, events[MAX_POLL_EVENTS];
+	size_t events_sz = MAX_POLL_EVENTS;
+	int ev_magic_listener = EV_MAGIC_LISTENER;
 
 	while ((opt = getopt(argc, argv, "l:dh")) != -1) {
 		switch (opt) {
@@ -491,10 +717,19 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+	set_nonblock(lsn_sock);
+	
 	printf("Transparent proxy service started on %s:%d\n",
 		   inet_ntoa(lsn_addr.sin_addr), ntohs(lsn_addr.sin_port));
 
-	/* Work as a daemon process. */
+	/* Create epoll table. */
+	if ((epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
+		fprintf(stderr, "*** epoll_create() failed: %s\n",
+				strerror(errno));
+		exit(1);
+	}
+
+	/* Run in background. */
 	if (is_daemon)
 		do_daemonize();
 
@@ -504,20 +739,93 @@ int main(int argc, char *argv[])
 	 */
 	signal(SIGPIPE, SIG_IGN);
 
-	/* Loop for incoming proxy connections. */
+	/* epoll loop */
+	ev.data.ptr = &ev_magic_listener;
+	ev.events = EPOLLIN;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, lsn_sock, &ev);
+
 	for (;;) {
-		struct sockaddr_in cli_addr;
-		socklen_t cli_alen = sizeof(cli_addr);
-		pthread_t conn_pth;
-
-		cli_sock = accept(lsn_sock, (struct sockaddr *)&cli_addr,
-						  &cli_alen);
-		if (cli_sock < 0)
+		int nfds, i;
+		
+		nfds = epoll_wait(epfd, events, events_sz, 1000 * 2);
+		if (nfds == 0)
 			continue;
-
-		/* Handle the connection in new thread. */
-		if (pthread_create(&conn_pth, NULL, conn_thread, (void *)(long)cli_sock) == 0)
-			pthread_detach(conn_pth);
+		if (nfds < 0) {
+			fprintf(stderr, "*** epoll_wait() error: %s\n", strerror(errno));
+		//	exit(1);
+		}
+		
+		for (i = 0; i < nfds; i++) {
+			struct epoll_event *evp = &events[i];
+			int *evptr = (int *)evp->data.ptr;
+			struct proxy_conn *conn;
+			int rc = 0;
+			
+			/* NULL evp->data.ptr indicates this socket is closed. */
+			if (evptr == NULL)
+				continue;
+			
+			if (*evptr == EV_MAGIC_LISTENER) {
+				/* A new connection calls in. */
+				rc = -1;
+				if (!(conn = accept_and_connect(lsn_sock, &rc)))
+					continue;
+			} else {
+				conn = get_conn_by_evptr(evptr);
+			}
+			
+			/**
+			 * 1. rc == 0 means I/O completes, can be treated in current epoll round;
+			 *    rc != 0 means I/O inprogress, cannot be treated in this round.
+			 * 2. If conn->state == S_CLOSING, close it.
+			 */
+			while (rc == 0 && conn->state != S_CLOSING) {
+				switch (conn->state) {
+					case S_FORWARDING:
+						rc = forward_data(conn, epfd, evp);
+						break;
+					case S_SERVER_CONNECTING:
+						rc = server_connecting(conn);
+						break;
+					case S_SERVER_CONNECTED:
+						rc = server_connected(conn);
+						break;
+					case S_SERVER_SENDING:
+						rc = server_send_buffer(conn);
+						break;
+					case S_SERVER_RECEIVING:
+						rc = server_recv_buffer(conn);
+						break;
+					case S_SENTV5METHOD:
+						conn->request.dlen = 2;
+						conn->request.rpos = 0;
+						conn->state = S_SERVER_RECEIVING;
+						conn->next_state = S_GOTV5METHOD;
+						break;
+					case S_GOTV5METHOD:
+						rc = read_socksv5_method(conn);
+						break;
+					case S_SENTV5CONNECT:
+						conn->request.dlen = 10;
+						conn->request.rpos = 0;
+						conn->state = S_SERVER_RECEIVING;
+						conn->next_state = S_GOTV5CONNECT;
+						break;
+					case S_GOTV5CONNECT:
+						rc = read_socksv5_connect(conn);
+						break;
+					default:
+						fprintf(stderr, "*** Undefined state: %d\n", conn->state);
+						conn->state = S_CLOSING;
+						rc = ECONNABORTED;
+				}
+			}
+			if (conn->state == S_CLOSING) {
+				release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
+			} else {
+				set_conn_epoll_fds(conn, epfd);
+			}
+		}
 	}
 
 	return 0;
