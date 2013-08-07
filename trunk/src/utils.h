@@ -8,6 +8,10 @@ typedef int bool;
 typedef u_int16_t u16;
 typedef u_int32_t u32;
 
+#define container_of(ptr, type, member) ({			\
+	const typeof(((type *)0)->member) * __mptr = (ptr);	\
+	(type *)((char *)__mptr - offsetof(type, member)); })
+
 static inline bool __isspace(char c)
 {
 	return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
