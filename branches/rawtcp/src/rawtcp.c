@@ -169,6 +169,7 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 	 */
 	if (conn->client_in_ep || conn->server_in_ep) {
 		for (i = 0; i < pending_fds; i++) {
+			ev = &pending_evs[i];
 			if (ev->data.ptr == &conn->ev_client ||
 				ev->data.ptr == &conn->ev_server) {
 				ev->data.ptr = NULL;
