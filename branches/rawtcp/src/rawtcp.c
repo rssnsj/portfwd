@@ -204,10 +204,6 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	ev_svr.events = 0;
 	
 	switch(conn->state) {
-		case S_SERVER_CONNECTING:
-			/* Wait for the server connection to establish. */
-			ev_svr.events = EPOLLOUT;
-			break;
 		case S_FORWARDING:
 			/* Connection established, data forwarding in progress. */
 			if (!conn->request.dlen && !conn->response.dlen) {
@@ -221,6 +217,10 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 				ev_cli.events = EPOLLOUT;
 				ev_svr.events = EPOLLOUT;
 			}
+			break;
+		case S_SERVER_CONNECTING:
+			/* Wait for the server connection to establish. */
+			ev_svr.events = EPOLLOUT;
 			break;
 	}
 	
@@ -264,6 +264,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 		fprintf(stderr, "*** accept() failed: %s\n", strerror(errno));
 		return NULL;
 	}
+	
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
 		fprintf(stderr, "*** malloc(struct proxy_conn) error: %s\n",
@@ -295,7 +296,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	conn->svr_addr.sin_addr.s_addr = htonl(g_dest_ip);
 	conn->svr_addr.sin_port = htons(g_dest_port);
 
-	printf("-- Client %s:%d calls in\n", inet_ntoa(conn->cli_addr.sin_addr),
+	printf("-- Client %s:%d entered\n", inet_ntoa(conn->cli_addr.sin_addr),
 		ntohs(conn->cli_addr.sin_port));
 	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
@@ -330,12 +331,12 @@ static int server_connecting(struct proxy_conn *conn)
 		&errlen) < 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
 		conn->state = S_CLOSING;
-		return EPERM;
+		return ECONNABORTED;
 	}
 	if (err != 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
 		conn->state = S_CLOSING;
-		return EPERM;
+		return ECONNABORTED;
 	}
 	/* Connected, preparing for data forwarding. */
 	conn->state = S_SERVER_CONNECTED;
@@ -353,7 +354,7 @@ static int server_connected(struct proxy_conn *conn)
 		fprintf(stderr, "*** Failed to allocate either request "
 				"or response buffers.\n");
 		conn->state = S_CLOSING;
-		return EPERM;
+		return ECONNABORTED;
 	}
 	
 	if (0) {
@@ -362,12 +363,11 @@ static int server_connected(struct proxy_conn *conn)
 		/* Direct access. */
 		conn->state = S_FORWARDING;
 	}
-	return EAGAIN;
+	return EWOULDBLOCK;
 }
 
 static int forward_data(struct proxy_conn *conn, int epfd,
-		struct epoll_event *ev, struct epoll_event *pending_evs,
-		int pending_fds)
+		struct epoll_event *ev)
 {
 	int *evptr = (int *)ev->data.ptr;
 	struct buffer_info *rxb, *txb;
@@ -388,7 +388,7 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
 			conn->state = S_CLOSING;
-			return EPERM;
+			return ECONNABORTED;
 		}
 		rxb->dlen = (unsigned)rc;
 	}
@@ -399,14 +399,14 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
 				ntohs(conn->cli_addr.sin_port));
 			conn->state = S_CLOSING;
-			return EPERM;
+			return ECONNABORTED;
 		}
 		txb->rpos += rc;
 		if (txb->rpos >= txb->dlen)
 			txb->rpos = txb->dlen = 0;
 	}
 	
-	return EAGAIN;
+	return EWOULDBLOCK;
 }
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
@@ -574,22 +574,21 @@ int main(int argc, char *argv[])
 			 *    rc != 0 means I/O inprogress, cannot be treated in this round.
 			 * 2. If conn->state == S_CLOSING, close it.
 			 */
-			while(rc == 0) {
+			while (rc == 0 && conn->state != S_CLOSING) {
 				switch (conn->state) {
+				case S_FORWARDING:
+					rc = forward_data(conn, epfd, evp);
+					break;
 				case S_SERVER_CONNECTING:
 					rc = server_connecting(conn);
 					break;
 				case S_SERVER_CONNECTED:
 					rc = server_connected(conn);
 					break;
-				case S_FORWARDING:
-					rc = forward_data(conn, epfd, evp, events + i + 1, nfds - 1 - i);
-					break;
 				default:
 					fprintf(stderr, "*** Undefined state: %d\n", conn->state);
 					conn->state = S_CLOSING;
-					rc = EPERM;
-					break;
+					rc = ECONNABORTED;
 				}
 			}
 			if (conn->state == S_CLOSING) {
