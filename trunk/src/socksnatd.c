@@ -27,7 +27,7 @@ static int do_daemonize(void)
 	int rc;
 	
 	if ((rc = fork()) < 0) {
-		fprintf(stderr, "*** fork() error: %s.", strerror(errno));
+		fprintf(stderr, "*** fork() error: %s.\n", strerror(errno));
 		return rc;
 	} else if (rc > 0) {
 		/* In parent process */
@@ -293,6 +293,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 			orig_alen = sizeof(orig_dst);
 	struct proxy_conn *conn;
 	struct proxy_server *ps;
+	char s1[20], s2[20];
 
 	cli_sock = accept(lsn_sock, (struct sockaddr *)&cli_addr, &cli_alen);
 	if (cli_sock < 0) {
@@ -326,8 +327,11 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	 *  listening address. Refuse the operation if so.
 	 */
 	
-	printf("-- Client %s:%d entered, ", inet_ntoa(conn->cli_addr.sin_addr),
-		ntohs(conn->cli_addr.sin_port));
+	printf("-- Client %s:%d -> %s:%d in, ",
+			strcpy(s1, inet_ntoa(conn->cli_addr.sin_addr)),
+			ntohs(conn->cli_addr.sin_port),
+			strcpy(s2, inet_ntoa(conn->orig_dst.sin_addr)),
+			ntohs(conn->orig_dst.sin_port));
 	
 	/* Select a proxy server to connect to the real server. */
 	ps = get_socks_server_by_ip(ntohl(orig_dst.sin_addr.s_addr));
@@ -335,18 +339,18 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 		/* No matching rule, use local network. */
 		conn->proxy_type = PROXY_NONE;
 		svr_addr = orig_dst;
-		printf("using local network\n");
+		printf("no proxy\n");
 	} else if (ps->server_sa.sin_addr.s_addr == 0 &&
 			ps->server_sa.sin_port == 0) {
 		/* Explicitly defined 'none', use local network. */
 		conn->proxy_type = PROXY_NONE;
 		svr_addr = orig_dst;
-		printf("using local network\n");
+		printf("no proxy\n");
 	} else {
 		/* Use SOCKS5 proxy. */
 		conn->proxy_type = PROXY_SOCKS5;
 		svr_addr = ps->server_sa;
-		printf("using proxy %s:%d\n", inet_ntoa(svr_addr.sin_addr),
+		printf("proxy %s:%d\n", inet_ntoa(svr_addr.sin_addr),
 			ntohs(svr_addr.sin_port));
 	}
 	
@@ -676,7 +680,7 @@ int main(int argc, char *argv[])
 				} else if (sscanf(optarg, "%d", &lsn_port) == 1) {
 					g_tcp_proxy_port = (unsigned short)lsn_port;
 				} else {
-					fprintf(stderr, "*** Invalid argument for '-l'.\n\n");
+					fprintf(stderr, "*** Invalid argument for '-l'.\n");
 					show_help(argc, argv);
 					exit(1);
 				}
@@ -707,7 +711,7 @@ int main(int argc, char *argv[])
 
 	lsn_sock = socket(PF_INET, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
-		fprintf(stderr, "*** socket() failed: %s.", strerror(errno));
+		fprintf(stderr, "*** socket() failed: %s.\n", strerror(errno));
 		exit(1);
 	}
 	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_reuse, sizeof(b_reuse));
