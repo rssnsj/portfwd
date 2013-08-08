@@ -59,6 +59,9 @@ static int set_nonblock(int sfd)
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
+#define EPOLL_TABLE_SIZE 2048
+#define MAX_POLL_EVENTS 100
+
 #define container_of(ptr, type, member) ({			\
 	const typeof(((type *)0)->member) * __mptr = (ptr);	\
 	(type *)((char *)__mptr - offsetof(type, member)); })
@@ -146,7 +149,7 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
 	conn->svr_sock = -1;
 	conn->ev_client = EV_MAGIC_CLIENT;
 	conn->ev_server = EV_MAGIC_SERVER;
-	conn->state = -1;
+	conn->state = S_INVALID;
 	conn->client_in_ep = false;
 	conn->server_in_ep = false;
 
@@ -164,8 +167,9 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 	struct epoll_event *ev;
 	
 	/**
-	 * Clear probable fd events that might belong to
-	 *  current connection.
+	 * Clear possible fd events that might belong to current
+	 *  connection. The event must be cleared or an invalid
+	 *  pointer might be accessed.
 	 */
 	if (conn->client_in_ep || conn->server_in_ep) {
 		for (i = 0; i < pending_fds; i++) {
@@ -430,8 +434,6 @@ int main(int argc, char *argv[])
 	char s_lsn_ip[20], s_dst_ip[20];
 	int lsn_port, dst_port;
 	int epfd;
-#define EPOLL_TABLE_SIZE 2048
-#define MAX_POLL_EVENTS 100
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
 	int ev_magic_listener = EV_MAGIC_LISTENER;
@@ -529,8 +531,8 @@ int main(int argc, char *argv[])
 		do_daemonize();
 
 	/**
-	 * Ignore PIPE signal, which is triggered by 'send'
-	 *  and will cause the process exit.
+	 * Ignore PIPE signal, which is triggered when send() to
+	 *  a half-closed socket which causes process to abort.
 	 */
 	signal(SIGPIPE, SIG_IGN);
 
@@ -570,8 +572,8 @@ int main(int argc, char *argv[])
 			}
 			
 			/**
-			 * 1. rc == 0 means I/O completes, can be treated in current epoll round;
-			 *    rc != 0 means I/O inprogress, cannot be treated in this round.
+			 * 1. rc == 0 means I/O completes, can be treated in current epoll cycle;
+			 *    rc != 0 means I/O inprogress, cannot be treated in this cycle.
 			 * 2. If conn->state == S_CLOSING, close it.
 			 */
 			while (rc == 0 && conn->state != S_CLOSING) {
