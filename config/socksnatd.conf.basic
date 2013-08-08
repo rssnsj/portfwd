@@ -2,10 +2,10 @@
 # Network ranges cannot be overlapped, for setting
 # the default rule please write: "default = xxxx"
 
-# default - US
+# default - SSH tunnel
 default = 127.0.0.1:1080
 
-# Local networks
+# Local networks - direct access
 192.168.0.0/16 = none
 172.16.0.0/12 = none
 10.0.0.0/8 = none
