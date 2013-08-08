@@ -71,6 +71,9 @@ void dumphex(void *p, unsigned len)
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
+#define EPOLL_TABLE_SIZE 2048
+#define MAX_POLL_EVENTS 100
+
 /* Statues indicators of proxy sessions. */
 enum conn_state {
 	S_INVALID,
@@ -113,10 +116,10 @@ struct proxy_conn {
 	int svr_sock;
 
 	/**
-	 * The two fields are used when an epoll event occur,
+	 * The two fields are used when an epoll event occurs,
 	 *  to know on which socket fd it is triggered,
 	 *  client or server.
-	 *  ev.data.ptr = &ct.ev_client;
+	 *  ev.data.ptr = &conn.ev_client;
 	 */
 	int ev_client;
 	int ev_server;
@@ -137,6 +140,9 @@ struct proxy_conn {
 	struct buffer_info response;
 };
 
+/* Choose conn->request.buf to use in SOCKS handshakes. */
+#define hsbuf(conn) ((conn)->request)
+
 /**
  * Get 'conn' structure by passing the ev.data.ptr
  * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
@@ -153,7 +159,7 @@ static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
 	return NULL;
 }
 
-static inline void reset_conn_buffers(struct proxy_conn *conn)
+static inline void rewind_conn_buffers(struct proxy_conn *conn)
 {
 	conn->request.rpos = conn->request.dlen = 0;
 	conn->response.rpos = conn->response.dlen = 0;
@@ -170,7 +176,7 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
 	conn->svr_sock = -1;
 	conn->ev_client = EV_MAGIC_CLIENT;
 	conn->ev_server = EV_MAGIC_SERVER;
-	conn->state = -1;
+	conn->state = S_INVALID;
 	conn->client_in_ep = false;
 	conn->server_in_ep = false;
 
@@ -188,8 +194,9 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 	struct epoll_event *ev;
 	
 	/**
-	 * Clear probable fd events that might belong to
-	 *  current connection.
+	 * Clear possible fd events that might belong to current
+	 *  connection. The event must be cleared or an invalid
+	 *  pointer might be accessed.
 	 */
 	if (conn->client_in_ep || conn->server_in_ep) {
 		for (i = 0; i < pending_fds; i++) {
@@ -402,6 +409,21 @@ static int server_connecting(struct proxy_conn *conn)
 	return 0;
 }
 
+static int send_socksv5_method(struct proxy_conn *conn)
+{
+	char verstring[] = { 0x05,    /* Version 5 SOCKS */
+						 0x01,    /* Number of Methods     */
+						 0x00,    /* Null Auth       */
+						/*0x02*/ };  /* User/Pass Auth  */
+	memcpy(hsbuf(conn).buf, verstring, sizeof(verstring));
+	hsbuf(conn).dlen = sizeof(verstring);
+	hsbuf(conn).rpos = 0;
+	conn->state = S_SERVER_SENDING;
+	conn->next_state = S_SENTV5METHOD;
+	/* Assume I/O ready now, try to send in the same epoll cycle. */
+	return 0;
+}
+
 static int server_connected(struct proxy_conn *conn)
 {
 	/* Allocate both buffers. */
@@ -421,17 +443,7 @@ static int server_connected(struct proxy_conn *conn)
 		conn->state = S_FORWARDING;
 		return EWOULDBLOCK;
 	} else if (conn->proxy_type == PROXY_SOCKS5) {
-		char verstring[] = { 0x05,    /* Version 5 SOCKS */
-							 0x01,    /* Number of Methods     */
-							 0x00,    /* Null Auth       */
-							/*0x02*/ };  /* User/Pass Auth  */
-		memcpy(conn->request.buf, verstring, sizeof(verstring));
-		conn->request.dlen = sizeof(verstring);
-		conn->request.rpos = 0;
-		conn->state = S_SERVER_SENDING;
-		conn->next_state = S_SENTV5METHOD;
-		/* Assume I/O ready now, try to send in the same epoll round. */
-		return 0;
+		return send_socksv5_method(conn);
 	} else if (conn->proxy_type == PROXY_SOCKS4) {
 		/* FIXME: Implement it */
 		conn->state = S_CLOSING;
@@ -448,11 +460,11 @@ static int server_send_buffer(struct proxy_conn *conn)
 	int rc = 0;
 	
 	for (;;) {
-		rc = send(conn->svr_sock, conn->request.buf + conn->request.rpos,
-				  conn->request.dlen - conn->request.rpos, 0);
+		rc = send(conn->svr_sock, hsbuf(conn).buf + hsbuf(conn).rpos,
+				  hsbuf(conn).dlen - hsbuf(conn).rpos, 0);
 		if (rc > 0) {
-			conn->request.rpos += rc;
-			if (conn->request.rpos >= conn->request.dlen) {
+			hsbuf(conn).rpos += rc;
+			if (hsbuf(conn).rpos >= hsbuf(conn).dlen) {
 				/* Sent the full buffer, return */
 				conn->state = conn->next_state;
 				return 0;
@@ -483,11 +495,11 @@ static int server_recv_buffer(struct proxy_conn *conn)
 	int rc = 0;
 
 	for (;;) {
-		rc = recv(conn->svr_sock, conn->request.buf + conn->request.rpos,
-				  conn->request.dlen - conn->request.rpos, 0);
+		rc = recv(conn->svr_sock, hsbuf(conn).buf + hsbuf(conn).rpos,
+				  hsbuf(conn).dlen - hsbuf(conn).rpos, 0);
 		if (rc > 0) {
-			conn->request.rpos += rc;
-			if (conn->request.rpos >= conn->request.dlen) {
+			hsbuf(conn).rpos += rc;
+			if (hsbuf(conn).rpos >= hsbuf(conn).dlen) {
 				/* Received the full size, return */
 				conn->state = conn->next_state;
 				return 0;
@@ -520,22 +532,22 @@ static int read_socksv5_method(struct proxy_conn *conn)
 						 0x00,    /* Reserved        */
 						 0x01 };  /* IP Version 4    */
 	
-	if ((unsigned char)conn->request.buf[1] == 0xff) {
+	if ((unsigned char)hsbuf(conn).buf[1] == 0xff) {
 		fprintf(stderr, "*** SOCKS5 method negotiation failed.\n");
 		conn->state = S_CLOSING;
 		return ECONNREFUSED;
 	}
 	
 	/* OK, send the CONNECT request. */
-	memcpy(conn->request.buf, constring, sizeof(constring));
-	conn->request.dlen = sizeof(constring);
-	memcpy(conn->request.buf + conn->request.dlen,
+	memcpy(hsbuf(conn).buf, constring, sizeof(constring));
+	hsbuf(conn).dlen = sizeof(constring);
+	memcpy(hsbuf(conn).buf + hsbuf(conn).dlen,
 			&conn->orig_dst.sin_addr.s_addr, 4);
-	conn->request.dlen += 4;
-	memcpy(conn->request.buf + conn->request.dlen,
+	hsbuf(conn).dlen += 4;
+	memcpy(hsbuf(conn).buf + hsbuf(conn).dlen,
 			&conn->orig_dst.sin_port, 2);
-	conn->request.dlen += 2;
-	conn->request.rpos = 0;
+	hsbuf(conn).dlen += 2;
+	hsbuf(conn).rpos = 0;
 	/* Total: 10 bytes */
 	
 	conn->state = S_SERVER_SENDING;
@@ -545,10 +557,10 @@ static int read_socksv5_method(struct proxy_conn *conn)
 
 static int read_socksv5_connect(struct proxy_conn *conn)
 {
-	if ((unsigned char)conn->request.buf[1] != 0x00) {
+	if ((unsigned char)hsbuf(conn).buf[1] != 0x00) {
 		fprintf(stderr, "*** SOCKS V5 connect failed: ");
 		conn->state = S_CLOSING;
-		switch ((unsigned char)conn->request.buf[1]) {
+		switch ((unsigned char)hsbuf(conn).buf[1]) {
 			case 1:
 				fprintf(stderr, "General SOCKS server failure\n");
 				return ECONNABORTED;
@@ -579,7 +591,7 @@ static int read_socksv5_connect(struct proxy_conn *conn)
 		}
 	}
 	
-	reset_conn_buffers(conn);
+	rewind_conn_buffers(conn);
 	conn->state = S_FORWARDING;
 	return EWOULDBLOCK;
 }
@@ -648,8 +660,6 @@ int main(int argc, char *argv[])
 	bool is_daemon = false;
 	struct rlimit rlim;
 	int epfd;
-#define EPOLL_TABLE_SIZE 2048
-#define MAX_POLL_EVENTS 100
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
 	int ev_magic_listener = EV_MAGIC_LISTENER;
@@ -734,8 +744,8 @@ int main(int argc, char *argv[])
 		do_daemonize();
 
 	/**
-	 * Ignore PIPE signal, which is triggered by 'send'
-	 *  and will cause the process exit.
+	 * Ignore PIPE signal, which is triggered when send() to
+	 *  a half-closed socket which causes process to abort.
 	 */
 	signal(SIGPIPE, SIG_IGN);
 
@@ -752,7 +762,7 @@ int main(int argc, char *argv[])
 			continue;
 		if (nfds < 0) {
 			fprintf(stderr, "*** epoll_wait() error: %s\n", strerror(errno));
-		//	exit(1);
+			exit(1);
 		}
 		
 		for (i = 0; i < nfds; i++) {
@@ -775,8 +785,8 @@ int main(int argc, char *argv[])
 			}
 			
 			/**
-			 * 1. rc == 0 means I/O completes, can be treated in current epoll round;
-			 *    rc != 0 means I/O inprogress, cannot be treated in this round.
+			 * 1. rc == 0 means I/O completes, can be treated in current epoll cycle;
+			 *    rc != 0 means I/O inprogress, cannot be treated in this cycle.
 			 * 2. If conn->state == S_CLOSING, close it.
 			 */
 			while (rc == 0 && conn->state != S_CLOSING) {
@@ -797,8 +807,8 @@ int main(int argc, char *argv[])
 						rc = server_recv_buffer(conn);
 						break;
 					case S_SENTV5METHOD:
-						conn->request.dlen = 2;
-						conn->request.rpos = 0;
+						hsbuf(conn).dlen = 2;
+						hsbuf(conn).rpos = 0;
 						conn->state = S_SERVER_RECEIVING;
 						conn->next_state = S_GOTV5METHOD;
 						break;
@@ -806,8 +816,8 @@ int main(int argc, char *argv[])
 						rc = read_socksv5_method(conn);
 						break;
 					case S_SENTV5CONNECT:
-						conn->request.dlen = 10;
-						conn->request.rpos = 0;
+						hsbuf(conn).dlen = 10;
+						hsbuf(conn).rpos = 0;
 						conn->state = S_SERVER_RECEIVING;
 						conn->next_state = S_GOTV5CONNECT;
 						break;
