@@ -6,7 +6,7 @@ prefix ?= /usr/local
 all: socksnatd libsehijack.so
 
 socksnatd: socksnatd.o config.o ipv4_rules.o
-	$(CC) -o $@ $^ -levent
+	$(CC) -o $@ $^ $(LDFLAGS) -levent
 
 libsehijack.so: libsehijack.c
 	$(CC) -Wall -fPIC -nostdlib -shared -D_GNU_SOURCE -ldl -o $@ $<
