@@ -61,14 +61,6 @@ enum proxy_type {
 	PROXY_SOCKS5,
 };
 
-void dumphex(void *p, unsigned len)
-{
-	unsigned char *__p = p;
-	for (; len; len--)
-		printf("%02x ", (unsigned)*(__p++));
-	printf("\n");
-}
-
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 #define EPOLL_TABLE_SIZE 2048
@@ -148,7 +140,7 @@ struct proxy_conn {
  * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
  *  or EV_MAGIC_SERVER.
  */
-static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
+static inline struct proxy_conn *conn_of_evptr(int *evptr)
 {
 	if (*evptr == EV_MAGIC_CLIENT)
 		return container_of(evptr, struct proxy_conn, ev_client);
@@ -224,8 +216,8 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 
 /**
  * Add or activate the epoll fds according to the status of
- *  'conn'. Different conn->state and buffer status will
- *  affect the polling behaviors.
+ *  'conn'. Different conn->state and buffer status result in
+ *  different poll behaviors.
  */
 static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 {
@@ -600,8 +592,7 @@ static int read_socksv5_connect(struct proxy_conn *conn)
 	return EWOULDBLOCK;
 }
 
-static int forward_data(struct proxy_conn *conn, int epfd,
-		struct epoll_event *ev)
+static int forward_data(struct proxy_conn *conn, struct epoll_event *ev)
 {
 	int *evptr = (int *)ev->data.ptr;
 	struct buffer_info *rxb, *txb;
@@ -787,7 +778,7 @@ int main(int argc, char *argv[])
 				if (!(conn = accept_and_connect(lsn_sock, &rc)))
 					continue;
 			} else {
-				conn = get_conn_by_evptr(evptr);
+				conn = conn_of_evptr(evptr);
 			}
 			
 			/**
@@ -798,7 +789,7 @@ int main(int argc, char *argv[])
 			while (rc == 0 && conn->state != S_CLOSING) {
 				switch (conn->state) {
 					case S_FORWARDING:
-						rc = forward_data(conn, epfd, evp);
+						rc = forward_data(conn, evp);
 						break;
 					case S_SERVER_CONNECTING:
 						rc = server_connecting(conn);
