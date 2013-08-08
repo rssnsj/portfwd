@@ -1,18 +1,25 @@
 #!/bin/sh -e
 
 prefix=.
-tmpfile=delegated-apnic-latest
+download_url="http://ftp.apnic.net/stats/apnic/delegated-apnic-latest"
+tmpfile="delegated-apnic-latest"
 
-[ -f $tmpfile  ] || wget http://ftp.apnic.net/stats/apnic/delegated-apnic-latest -O $tmpfile
+[ -f $tmpfile  ] || wget "$download_url" -O $tmpfile
 
-for country_proxy in CN=none TW=127.0.0.1:8080; do
-	country=`echo "$country_proxy" | awk -F= '{print $1}'`
-	proxy=`echo "$country_proxy" | awk -F= '{print $2}'`
-	echo "# ==== Contry: $country, proxy: $proxy ===="
-	awk -F'|' -vc="$country" '$2==c&&$3=="ipv4"{printf "%s:+%s\n", $4, $5-1}' $tmpfile |
-		xargs -n1 netmask -r | awk -vp="$proxy" '{printf "%s = %s\n", $1, p}'
+(
+	echo "# Data from: $download_url"
+	echo -n "# Date: "; date -u
 	echo ""
-done > __config_tmp
+	
+	for country_proxy in CN=none TW=127.0.0.1:1080; do
+		country=`echo "$country_proxy" | awk -F= '{print $1}'`
+		proxy=`echo "$country_proxy" | awk -F= '{print $2}'`
+		echo "# ==== Contry: $country, proxy: $proxy ===="
+		awk -F'|' -vc="$country" '$2==c&&$3=="ipv4"{printf "%s:+%s\n", $4, $5-1}' $tmpfile |
+			xargs -n1 netmask -r | awk -vp="$proxy" '{printf "%s = %s\n", $1, p}'
+		echo ""
+	done
+) > __config_tmp
 
 rule_items=`cat __config_tmp | wc -l`
 
