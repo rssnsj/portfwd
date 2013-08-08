@@ -122,7 +122,7 @@ void init_proxy_rules_or_exit(void)
 	static size_t line_sz = sizeof(line);
 	
 	if ((fp = fopen(g_default_cfg_file, "r")) == NULL) {
-		fprintf(stderr, "*** Config file %s not found.",
+		fprintf(stderr, "*** Configuration file %s not found.\n",
 				g_default_cfg_file);
 		exit(1);
 	}
@@ -220,7 +220,7 @@ void init_proxy_rules_or_exit(void)
 				}
 			}
 		} else {
-			fprintf(stderr, "*** Ignored unrecognized config line: %s", line);
+			fprintf(stderr, "*** Ignored unrecognized config line: %s\n", line);
 		}
 	}
 	fclose(fp);
