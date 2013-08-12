@@ -1,8 +1,18 @@
-#!/bin/sh -x
-homedir=~
-export STAGING_DIR=$homedir/backfire-db120/staging_dir/toolchain-mips_gcc-4.3.3+cs_uClibc-0.9.30.1/bin
+#!/bin/sh
 
-make CROSS_COMPILE=$STAGING_DIR/mips-openwrt-linux- \
-	CFLAGS=-I$homedir/backfire-db120/build_dir/target-mips_uClibc-0.9.30.1/libevent-2.0.16-stable \
-	LDFLAGS=-L$homedir/backfire-db120/build_dir/target-mips_uClibc-0.9.30.1/libevent-2.0.16-stable/.libs
+openwrt_root=~/openwrt-ar9331
+
+[ -z "$1" ] || openwrt_root="$1"
+
+for dir in $openwrt_root/staging_dir/toolchain-mips_*/bin; do
+	[ -d "$dir" ] && { STAGING_DIR="$dir"; break; }
+done
+export STAGING_DIR
+
+for dir in $openwrt_root/build_dir/target-mips_*/libevent-*-stable; do
+	[ -d "$dir" ] && { libevent_dir="$dir"; break; }
+done
+
+set -x
+make CROSS_COMPILE=$STAGING_DIR/mips-openwrt-linux- CFLAGS=-I$libevent_dir LDFLAGS=-L$libevent_dir/.libs
 
