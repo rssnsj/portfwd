@@ -1,0 +1,26 @@
+# This file is interpreted as shell script.
+# Put your custom iptables rules here, they will
+# be executed with each firewall (re-)start.
+
+# Create new chain
+iptables -t nat -N socksnat
+
+# Ignore LANs and some other reserved addresses.
+iptables -t nat -A socksnat -d 10.0.0.0/8 -j RETURN
+iptables -t nat -A socksnat -d 172.20.0.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.0.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.3.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.100.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.101.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.102.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.103.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.104.0/24 -j RETURN
+iptables -t nat -A socksnat -d 192.168.105.0/24 -j RETURN
+iptables -t nat -A socksnat -d 224.0.0.0/4 -j RETURN
+
+# Anything else should be redirected to port 7070
+iptables -t nat -A socksnat -p tcp -j DNAT --to 172.20.0.1:7070
+
+# Direct TCP connections to socksnat port
+iptables -t nat -I PREROUTING -s 172.20.0.0/24 -p tcp -j socksnat
+
