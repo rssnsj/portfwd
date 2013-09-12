@@ -7,11 +7,12 @@ tmpfile="delegated-apnic-latest"
 [ -f $tmpfile  ] || wget "$download_url" -O $tmpfile
 
 (
-	echo "# Data from: $download_url"
+	echo "# Data from: ${download_url}"
 	echo -n "# Date: "; date -u
 	echo ""
-	
-	for country_proxy in CN=none TW=127.0.0.1:1080; do
+
+	# CN=none TW=127.0.0.1:1080
+	for country_proxy in CN=none; do
 		country=`echo "$country_proxy" | awk -F= '{print $1}'`
 		proxy=`echo "$country_proxy" | awk -F= '{print $2}'`
 		echo "# ==== Contry: $country, proxy: $proxy ===="
