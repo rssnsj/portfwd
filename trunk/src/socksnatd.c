@@ -21,6 +21,7 @@
 
 static unsigned int   g_tcp_proxy_ip   = 0;
 static unsigned short g_tcp_proxy_port = 7070;
+static const char    *g_pid_file = "/var/run/socksnatd.pid";
 
 static int do_daemonize(void)
 {
@@ -45,6 +46,21 @@ static int do_daemonize(void)
 		chdir("/tmp");
 	}
 	return 0;
+}
+
+static void write_pidfile(const char *path)
+{
+	int pid;
+	FILE *fp;
+
+	pid = (int)getpid();
+	if (!(fp = fopen(path, "w"))) {
+		fprintf(stderr, "*** Cannot create/open PID file '%s': %s\n",
+				path, strerror(errno));
+		return;
+	}
+	fprintf(fp, "%d\n", pid);
+	fclose(fp);
 }
 
 static int set_nonblock(int sfd)
@@ -636,6 +652,12 @@ static int forward_data(struct proxy_conn *conn, struct epoll_event *ev)
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
+static void clean_and_exit(int sig)
+{
+	remove(g_pid_file);
+	exit(0);
+}
+
 static void show_help(int argc, char *argv[])
 {
 	printf("IP-to-SOCKS transforming gateway service.\n");
@@ -644,6 +666,7 @@ static void show_help(int argc, char *argv[])
 	printf("Options:\n");
 	printf("  -l [local_ip:]port          TCP proxy listening address, default: 0.0.0.0:7070\n");
 	printf("  -d                          run in background\n");
+	printf("  -p                          PID file, default: %s\n", g_pid_file);
 }
 
 int main(int argc, char *argv[])
@@ -659,7 +682,7 @@ int main(int argc, char *argv[])
 	size_t events_sz = MAX_POLL_EVENTS;
 	int ev_magic_listener = EV_MAGIC_LISTENER;
 
-	while ((opt = getopt(argc, argv, "l:dh")) != -1) {
+	while ((opt = getopt(argc, argv, "l:dp:h")) != -1) {
 		switch (opt) {
 		case 'l': {
 				char s_lsn_ip[20];
@@ -679,6 +702,9 @@ int main(int argc, char *argv[])
 			}
 		case 'd':
 			is_daemon = true;
+			break;
+		case 'p':
+			g_pid_file = optarg;
 			break;
 		case 'h':
 			show_help(argc, argv);
@@ -738,6 +764,11 @@ int main(int argc, char *argv[])
 	if (is_daemon)
 		do_daemonize();
 
+	write_pidfile(g_pid_file);
+
+	/* Do some cleaning before exit. */
+	signal(SIGINT, clean_and_exit);
+	signal(SIGTERM, clean_and_exit);
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
 	 *  a half-closed socket which causes process to abort.

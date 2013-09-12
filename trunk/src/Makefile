@@ -1,7 +1,7 @@
 CC = $(CROSS_COMPILE)gcc
-CFLAGS ?= -g
+CFLAGS  ?= 
 LDFLAGS ?= 
-prefix ?= /usr/local
+prefix  ?= /usr
 
 all: socksnatd libsehijack.so
 
@@ -15,9 +15,9 @@ libsehijack.so: libsehijack.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
 install: all
-	mkdir -p $(DESTDIR)$(prefix)/bin
+	mkdir -p $(DESTDIR)$(prefix)/sbin
 	mkdir -p $(DESTDIR)$(prefix)/lib
-	cp -vf socksnatd $(DESTDIR)$(prefix)/bin/
+	cp -vf socksnatd $(DESTDIR)$(prefix)/sbin/
 	cp -vf libsehijack.so $(DESTDIR)$(prefix)/lib/
 
 clean:
