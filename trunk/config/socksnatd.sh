@@ -1,6 +1,6 @@
 #!/bin/sh
 
-PIDFILE=/var/run/socksnatd
+PIDFILE=/var/run/socksnatd.pid
 
 do_start()
 {
