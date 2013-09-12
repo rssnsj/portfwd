@@ -4,7 +4,7 @@ PIDFILE=/var/run/socksnatd.pid
 
 do_start()
 {
-	/usr/sbin/socksnatd -p $PIDFILE -d
+	/usr/sbin/socksnatd -l 0.0.0.0:7070 -p $PIDFILE -d
 }
 
 do_stop()
