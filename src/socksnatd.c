@@ -138,6 +138,8 @@ struct proxy_conn {
 	/* Memorize the session addresses. */
 	struct sockaddr_in cli_addr;
 	struct sockaddr_in orig_dst;
+	/* Proxy server address or dst address without proxy. */
+	struct sockaddr_in svr_addr;
 
 	/* To know if the fds are already added to epoll. */
 	bool client_in_ep;
@@ -296,7 +298,7 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 {
 	int cli_sock, svr_sock;
-	struct sockaddr_in cli_addr, orig_dst, svr_addr;
+	struct sockaddr_in cli_addr, orig_dst;
 	socklen_t cli_alen = sizeof(cli_addr),
 			orig_alen = sizeof(orig_dst);
 	struct proxy_conn *conn;
@@ -346,20 +348,20 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	if (!ps) {
 		/* No matching rule, use local network. */
 		conn->proxy_type = PROXY_NONE;
-		svr_addr = orig_dst;
+		conn->svr_addr = orig_dst;
 		printf("no proxy\n");
 	} else if (ps->server_sa.sin_addr.s_addr == 0 &&
 			ps->server_sa.sin_port == 0) {
 		/* Explicitly defined 'none', use local network. */
 		conn->proxy_type = PROXY_NONE;
-		svr_addr = orig_dst;
+		conn->svr_addr = orig_dst;
 		printf("no proxy\n");
 	} else {
 		/* Use SOCKS5 proxy. */
 		conn->proxy_type = PROXY_SOCKS5;
-		svr_addr = ps->server_sa;
-		printf("proxy %s:%d\n", inet_ntoa(svr_addr.sin_addr),
-			ntohs(svr_addr.sin_port));
+		conn->svr_addr = ps->server_sa;
+		printf("proxy %s:%d\n", inet_ntoa(conn->svr_addr.sin_addr),
+			ntohs(conn->svr_addr.sin_port));
 	}
 	
 	/* Initiate the connection to server right now. */
@@ -377,8 +379,8 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	set_nonblock(conn->svr_sock);
 	
 	/* Connect to server. */
-	if ((connect(conn->svr_sock, (struct sockaddr *)&svr_addr,
-		sizeof(svr_addr))) == 0) {
+	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
+		sizeof(conn->svr_addr))) == 0) {
 		/* Connected, prepare for data forwarding. */
 		conn->state = S_SERVER_CONNECTED;
 		*error = 0;
@@ -402,20 +404,19 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 static int server_connecting(struct proxy_conn *conn)
 {
 	/* The connection has established or failed. */
-	int err = 0;
-	socklen_t errlen = sizeof(err);
 	
-	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err,
-		&errlen) < 0) {
+	/**
+	 * NOTICE: Use 'connect' instead of 'getsockopt' to complete
+	 *  a successful connection, since only 'connect' can be
+	 *  captured by the LD_PRELOAD module.
+	 */
+	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
+		sizeof(conn->svr_addr))) != 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
 		conn->state = S_CLOSING;
 		return ECONNABORTED;
 	}
-	if (err != 0) {
-		fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
-		conn->state = S_CLOSING;
-		return ECONNABORTED;
-	}
+
 	/* Connected, preparing for data forwarding. */
 	conn->state = S_SERVER_CONNECTED;
 	return 0;
