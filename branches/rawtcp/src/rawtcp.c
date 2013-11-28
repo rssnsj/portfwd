@@ -14,15 +14,21 @@
 #include <sys/resource.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 typedef int bool;
 #define true  1
 #define false 0
 
-static unsigned int   g_source_ip   = 0;
-static unsigned short g_source_port = 0;
-static unsigned int   g_dest_ip     = 0;
-static unsigned short g_dest_port   = 0;
+//static unsigned int   g_source_ip   = 0;
+//static unsigned short g_source_port = 0;
+//static unsigned int   g_dest_ip     = 0;
+//static unsigned short g_dest_port   = 0;
+
+static struct sockaddr_storage g_src_sockaddr;
+static struct sockaddr_storage g_dst_sockaddr;
+static socklen_t g_src_addrlen;
+static socklen_t g_dst_addrlen;
 
 static int do_daemonize(void)
 {
@@ -110,8 +116,8 @@ struct proxy_conn {
 	unsigned short state;
 
 	/* Memorize the session addresses. */
-	struct sockaddr_in cli_addr;
-	struct sockaddr_in svr_addr;
+	struct sockaddr_storage cli_addr;
+	struct sockaddr_storage svr_addr;
 
 	/* To know if the fds are already added to epoll. */
 	bool client_in_ep;
@@ -258,7 +264,7 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 {
 	int cli_sock, svr_sock;
-	struct sockaddr_in cli_addr;
+	struct sockaddr_storage cli_addr;
 	socklen_t cli_alen = sizeof(cli_addr);
 	struct proxy_conn *conn;
 
@@ -281,9 +287,8 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	conn->cli_addr = cli_addr;
 	
 	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
-		fprintf(stderr, "*** socket(svr_sock) error: %s\n",
-				strerror(errno));
+	if ((svr_sock = socket(g_dst_sockaddr.ss_family, SOCK_STREAM, 0)) < 0) {
+		fprintf(stderr, "*** socket(svr_sock) error: %s\n", strerror(errno));
 		/**
 		 * 'conn' has only been used among this function,
 		 *  so don't need the caller to release anything.
@@ -294,17 +299,14 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	conn->svr_sock = svr_sock;
 	set_nonblock(conn->svr_sock);
 	
-	/* Connect to server. */
-	memset(&conn->svr_addr, 0x0, sizeof(conn->svr_addr));
-	conn->svr_addr.sin_family = AF_INET;
-	conn->svr_addr.sin_addr.s_addr = htonl(g_dest_ip);
-	conn->svr_addr.sin_port = htons(g_dest_port);
+	/* Connect to real server. */
+	conn->svr_addr = g_dst_sockaddr;
 
-	printf("-- Client %s:%d entered\n", inet_ntoa(conn->cli_addr.sin_addr),
-		ntohs(conn->cli_addr.sin_port));
+	//printf("-- Client %s:%d entered\n", inet_ntoa(conn->cli_addr.sin_addr),
+	//	ntohs(conn->cli_addr.sin_port));
 	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
-		sizeof(conn->svr_addr))) == 0) {
+		g_dst_addrlen)) == 0) {
 		/* Connected, prepare for data forwarding. */
 		conn->state = S_SERVER_CONNECTED;
 		*error = 0;
@@ -389,8 +391,10 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 	
 	if (ev->events & EPOLLIN) {
 		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
-			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
-				ntohs(conn->cli_addr.sin_port));
+			//char s1[44];
+			//printf("-- Client %s exits\n",
+			//	inet_ntop(conn->cli_addr.ss_family, &conn->cli_addr,
+			//		s1, sizeof(conn->cli_addr)));
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
 		}
@@ -400,8 +404,10 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 	if (ev->events & EPOLLOUT) {
 		if ((rc = send(efd, txb->buf + txb->rpos,
 			txb->dlen - txb->rpos, 0)) <= 0) {
-			printf("-- Client %s:%d exits\n", inet_ntoa(conn->cli_addr.sin_addr),
-				ntohs(conn->cli_addr.sin_port));
+			//char s1[44];
+			//printf("-- Client %s exits\n",
+			//	inet_ntop(conn->svr_addr.ss_family, &conn->svr_addr,
+			//		s1, sizeof(conn->svr_addr)));
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
 		}
@@ -411,6 +417,37 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 	}
 	
 	return EWOULDBLOCK;
+}
+
+static int get_sockaddr_v4v6(const char *node, int port,
+		int socktype, int *family, struct sockaddr_storage *addr,
+		socklen_t *addrlen)
+{
+	struct addrinfo hints, *result;
+	char s_port[12];
+	int rc;
+
+	sprintf(s_port, "%d", port);
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = *family;    /* Allow IPv4 or IPv6 */
+	hints.ai_socktype = socktype;
+	hints.ai_flags = AI_PASSIVE;    /* For wildcard IP address */
+	hints.ai_protocol = 0;          /* Any protocol */
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+	
+	if ((rc = getaddrinfo(node, s_port, &hints, &result))) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+		return -1;
+	}
+	
+	/* Get the first resolved address */
+	*family = result->ai_family;
+	*addrlen = result->ai_addrlen;
+	memcpy(addr, result->ai_addr, result->ai_addrlen);
+	freeaddrinfo(result);
+	return 0;
 }
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
@@ -427,12 +464,11 @@ static void show_help(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
 	int lsn_sock;
-	struct sockaddr_in lsn_addr;
-	int b_reuse = 1;
-	int opt;
+	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
+	int b_reuse = 1, opt;
 	bool is_daemon = false;
-	char s_lsn_ip[20], s_dst_ip[20];
-	int lsn_port, dst_port;
+	char s_src_host[50], s_dst_host[50];
+	int src_port, dst_port;
 	int epfd;
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
@@ -458,53 +494,50 @@ int main(int argc, char *argv[])
 	}
 
 	/* Parse source address. */
-	if (sscanf(argv[optind], "%19[^:]:%d", s_lsn_ip,
-		&lsn_port) == 2) {
-		g_source_ip = ntohl(inet_addr(s_lsn_ip));
-		g_source_port = lsn_port;
-	} else if (sscanf(argv[optind], "%d", &lsn_port) == 1) {
-		g_source_port = (unsigned short)lsn_port;
+	if (sscanf(argv[optind], "[%40[^]]]:%d", s_src_host,
+		&src_port) == 2) {
+	} else if (sscanf(argv[optind], "%40[^:]:%d", s_src_host,
+		&src_port) == 2) {
+	} else if (sscanf(argv[optind], "%d", &src_port) == 1) {
+		strcpy(s_src_host, "0.0.0.0");
 	} else {
 		fprintf(stderr, "*** Invalid source address '%s'.\n",
 				argv[optind]);
-		show_help(argc, argv);
 		exit(1);
 	}
 	optind++;
 
 	/* Parse destination address. */
-	if (sscanf(argv[optind], "%19[^:]:%d", s_dst_ip,
-		&dst_port) != 2) {
+	if (sscanf(argv[optind], "[%40[^]]]:%d", s_dst_host,
+		&dst_port) == 2) {
+	} else if (sscanf(argv[optind], "%19[^:]:%d", s_dst_host,
+		&dst_port) == 2) {
+	} else {
 		fprintf(stderr, "*** Invalid destination address '%s'.\n",
 				argv[optind]);
-		show_help(argc, argv);
 		exit(1);
 	}
-	g_dest_ip = ntohl(inet_addr(s_dst_ip));
-	g_dest_port = (unsigned short)dst_port;
 
-	/* Enlarge the file descriptor limination. */
-	//if (getrlimit(RLIMIT_NOFILE, &rlim) == 0) {
-	//	if (rlim.rlim_max < 20480) {
-	//		rlim.rlim_cur = rlim.rlim_max = 20480;
-	//		setrlimit(RLIMIT_NOFILE, &rlim);
-	//	}
-	//}
-
-	lsn_sock = socket(PF_INET, SOCK_STREAM, 0);
+	/* Resolve the addresses */
+	if (get_sockaddr_v4v6(s_src_host, src_port, SOCK_STREAM,
+		&src_family, &g_src_sockaddr, &g_src_addrlen)) {
+		fprintf(stderr, "*** Invalid source address.\n");
+		exit(1);
+	}
+	if (get_sockaddr_v4v6(s_dst_host, dst_port, SOCK_STREAM,
+		&dst_family, &g_dst_sockaddr, &g_dst_addrlen)) {
+		fprintf(stderr, "*** Invalid destination address.\n");
+		exit(1);
+	}
+	
+	lsn_sock = socket(g_src_sockaddr.ss_family, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
 		fprintf(stderr, "*** socket() failed: %s.", strerror(errno));
 		exit(1);
 	}
 	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_reuse, sizeof(b_reuse));
 
-	memset(&lsn_addr, 0x0, sizeof(lsn_addr));
-	lsn_addr.sin_family = AF_INET;
-	lsn_addr.sin_addr.s_addr = htonl(g_source_ip);
-	lsn_addr.sin_port = htons(g_source_port);
-
-	if (bind(lsn_sock, (struct sockaddr *)&lsn_addr,
-		sizeof(lsn_addr)) < 0) {
+	if (bind(lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
 		fprintf(stderr, "*** bind() failed: %s.\n", strerror(errno));
 		exit(1);
 	}
@@ -517,7 +550,7 @@ int main(int argc, char *argv[])
 	set_nonblock(lsn_sock);
 	
 	printf("TCP proxy %s:%d -> %s:%d started \n",
-		   s_lsn_ip, lsn_port, s_dst_ip, dst_port);
+		   s_src_host, src_port, s_dst_host, dst_port);
 
 	/* Create epoll table. */
 	if ((epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
