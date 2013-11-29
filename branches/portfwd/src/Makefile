@@ -14,7 +14,7 @@ udpfwd: udpfwd.o
 
 install: tcpfwd
 	mkdir -p /usr/local/bin
-	cp -vf tcpfwd /usr/local/bin/
+	cp -vf tcpfwd udpfwd /usr/local/bin/
 
 clean:
 	rm -f tcpfwd udpfwd *.o

@@ -485,7 +485,7 @@ int main(int argc, char *argv[])
 {
 	int lsn_sock;
 	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
-	int b_reuse = 1, opt;
+	int b_sockopt = 1, opt;
 	bool is_daemon = false;
 	char s_src_host[50], s_dst_host[50];
 	int src_port, dst_port;
@@ -555,7 +555,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "*** socket() failed: %s.", strerror(errno));
 		exit(1);
 	}
-	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_reuse, sizeof(b_reuse));
+
+	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_sockopt, sizeof(b_sockopt));
 
 	if (bind(lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
 		fprintf(stderr, "*** bind() failed: %s.\n", strerror(errno));
