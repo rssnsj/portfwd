@@ -1,16 +1,16 @@
 CC = $(CROSS_COMPILE)gcc
 CFLAGS = -g
 
-rawtcp: rawtcp.o
+tcpfwd: tcpfwd.o
 	$(CC) -o $@ $^ $(LDFLAGS) -levent
 
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
-install: rawtcp
+install: tcpfwd
 	mkdir -p /usr/local/bin
-	cp -vf rawtcp /usr/local/bin/
+	cp -vf tcpfwd /usr/local/bin/
 
 clean:
-	rm -f rawtcp *.o
+	rm -f tcpfwd *.o
 
