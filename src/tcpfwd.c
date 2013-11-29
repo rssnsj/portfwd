@@ -30,6 +30,27 @@ static struct sockaddr_storage g_dst_sockaddr;
 static socklen_t g_src_addrlen;
 static socklen_t g_dst_addrlen;
 
+static char *get_sockaddr_pair(const void *addr,
+		char *host, int *port)
+{
+	const union __sa_union {
+		struct sockaddr_storage ss;
+		struct sockaddr_in sa4;
+		struct sockaddr_in6 sa6;
+	} *sa = addr;
+	
+	if (sa->ss.ss_family == AF_INET) {
+		inet_ntop(AF_INET, &sa->sa4.sin_addr, host, 16);
+		*port = ntohs(sa->sa4.sin_port);
+	} else if (sa->ss.ss_family == AF_INET6) {
+		inet_ntop(AF_INET6, &sa->sa6.sin6_addr, host, 40);
+		*port = ntohs(sa->sa6.sin6_port);
+	} else {
+		return NULL;
+	}
+	return host;
+}
+
 static int do_daemonize(void)
 {
 	int rc;
@@ -267,6 +288,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	struct sockaddr_storage cli_addr;
 	socklen_t cli_alen = sizeof(cli_addr);
 	struct proxy_conn *conn;
+	char s1[44] = ""; int n1 = 0;
 
 	cli_sock = accept(lsn_sock, (struct sockaddr *)&cli_addr, &cli_alen);
 	if (cli_sock < 0) {
@@ -302,8 +324,8 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	/* Connect to real server. */
 	conn->svr_addr = g_dst_sockaddr;
 
-	//printf("-- Client %s:%d entered\n", inet_ntoa(conn->cli_addr.sin_addr),
-	//	ntohs(conn->cli_addr.sin_port));
+	get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+	printf("-- Client [%s]:%d entered\n", s1, n1);
 	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		g_dst_addrlen)) == 0) {
@@ -391,10 +413,9 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 	
 	if (ev->events & EPOLLIN) {
 		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
-			//char s1[44];
-			//printf("-- Client %s exits\n",
-			//	inet_ntop(conn->cli_addr.ss_family, &conn->cli_addr,
-			//		s1, sizeof(conn->cli_addr)));
+			char s1[44] = ""; int n1 = 0;
+			get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+			printf("-- Client [%s]:%d exits\n", s1, n1);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
 		}
@@ -404,10 +425,9 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 	if (ev->events & EPOLLOUT) {
 		if ((rc = send(efd, txb->buf + txb->rpos,
 			txb->dlen - txb->rpos, 0)) <= 0) {
-			//char s1[44];
-			//printf("-- Client %s exits\n",
-			//	inet_ntop(conn->svr_addr.ss_family, &conn->svr_addr,
-			//		s1, sizeof(conn->svr_addr)));
+			char s1[44] = ""; int n1 = 0;
+			get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+			printf("-- Client [%s]:%d exits\n", s1, n1);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
 		}
