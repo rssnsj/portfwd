@@ -1,25 +1,16 @@
 CC = $(CROSS_COMPILE)gcc
-CFLAGS  ?= 
-LDFLAGS ?= 
-prefix  ?= /usr
+CFLAGS = -g
 
-all: socksnatd libsehijack.so
-
-socksnatd: socksnatd.o config.o ipv4_rules.o
+rawtcp: rawtcp.o
 	$(CC) -o $@ $^ $(LDFLAGS) -levent
 
-libsehijack.so: libsehijack.c
-	$(CC) -Wall -fPIC -nostdlib -shared -D_GNU_SOURCE -ldl -o $@ $<
-
-%.o: %.c config.h ipv4_rules.h utils.h
+%.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
-install: all
-	mkdir -p $(DESTDIR)$(prefix)/sbin
-	mkdir -p $(DESTDIR)$(prefix)/lib
-	cp -vf socksnatd $(DESTDIR)$(prefix)/sbin/
-	cp -vf libsehijack.so $(DESTDIR)$(prefix)/lib/
+install: rawtcp
+	mkdir -p /usr/local/bin
+	cp -vf rawtcp /usr/local/bin/
 
 clean:
-	rm -f socksnatd *.o *.so
+	rm -f rawtcp *.o
 
