@@ -15,14 +15,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <pthread.h>
 #include <time.h>
 
 typedef int bool;
 #define true  1
 #define false 0
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 #include <sys/types.h>
 #include <stddef.h>
@@ -152,149 +151,12 @@ static inline void list_del(struct list_head *entry)
 }
 
 /**
- * list_replace - replace old entry by new one
- * @old : the element to be replaced
- * @new : the new element to insert
- *
- * If @old was empty, it will be overwritten.
- */
-static inline void list_replace(struct list_head *old,
-				struct list_head *new)
-{
-	new->next = old->next;
-	new->next->prev = new;
-	new->prev = old->prev;
-	new->prev->next = new;
-}
-
-static inline void list_replace_init(struct list_head *old,
-					struct list_head *new)
-{
-	list_replace(old, new);
-	INIT_LIST_HEAD(old);
-}
-
-/**
- * list_del_init - deletes entry from list and reinitialize it.
- * @entry: the element to delete from the list.
- */
-static inline void list_del_init(struct list_head *entry)
-{
-	__list_del(entry->prev, entry->next);
-	INIT_LIST_HEAD(entry);
-}
-
-/**
- * list_move - delete from one list and add as another's head
- * @list: the entry to move
- * @head: the head that will precede our entry
- */
-static inline void list_move(struct list_head *list, struct list_head *head)
-{
-	__list_del(list->prev, list->next);
-	list_add(list, head);
-}
-
-/**
- * list_move_tail - delete from one list and add as another's tail
- * @list: the entry to move
- * @head: the head that will follow our entry
- */
-static inline void list_move_tail(struct list_head *list,
-				  struct list_head *head)
-{
-	__list_del(list->prev, list->next);
-	list_add_tail(list, head);
-}
-
-/**
- * list_is_last - tests whether @list is the last entry in list @head
- * @list: the entry to test
- * @head: the head of the list
- */
-static inline int list_is_last(const struct list_head *list,
-				const struct list_head *head)
-{
-	return list->next == head;
-}
-
-/**
  * list_empty - tests whether a list is empty
  * @head: the list to test.
  */
 static inline int list_empty(const struct list_head *head)
 {
 	return head->next == head;
-}
-
-/**
- * list_empty_careful - tests whether a list is empty and not being modified
- * @head: the list to test
- *
- * Description:
- * tests whether a list is empty _and_ checks that no other CPU might be
- * in the process of modifying either member (next or prev)
- *
- * NOTE: using list_empty_careful() without synchronization
- * can only be safe if the only activity that can happen
- * to the list entry is list_del_init(). Eg. it cannot be used
- * if another CPU could re-list_add() it.
- */
-static inline int list_empty_careful(const struct list_head *head)
-{
-	struct list_head *next = head->next;
-	return (next == head) && (next == head->prev);
-}
-
-/**
- * list_is_singular - tests whether a list has just one entry.
- * @head: the list to test.
- */
-static inline int list_is_singular(const struct list_head *head)
-{
-	return !list_empty(head) && (head->next == head->prev);
-}
-
-static inline void __list_splice(const struct list_head *list,
-				 struct list_head *head)
-{
-	struct list_head *first = list->next;
-	struct list_head *last = list->prev;
-	struct list_head *at = head->next;
-
-	first->prev = head;
-	head->next = first;
-
-	last->next = at;
-	at->prev = last;
-}
-
-/**
- * list_splice - join two lists
- * @list: the new list to add.
- * @head: the place to add it in the first list.
- */
-static inline void list_splice(const struct list_head *list,
-				struct list_head *head)
-{
-	if (!list_empty(list))
-		__list_splice(list, head);
-}
-
-/**
- * list_splice_init - join two lists and reinitialise the emptied list.
- * @list: the new list to add.
- * @head: the place to add it in the first list.
- *
- * The list at @list is reinitialised
- */
-static inline void list_splice_init(struct list_head *list,
-				    struct list_head *head)
-{
-	if (!list_empty(list)) {
-		__list_splice(list, head);
-		INIT_LIST_HEAD(list);
-	}
 }
 
 /**
@@ -318,58 +180,6 @@ static inline void list_splice_init(struct list_head *list,
 	list_entry((ptr)->next, type, member)
 
 /**
- * list_for_each	-	iterate over a list
- * @pos:	the &struct list_head to use as a loop cursor.
- * @head:	the head for your list.
- */
-#define list_for_each(pos, head) \
-	for (pos = (head)->next; /*prefetch(pos->next),*/ pos != (head); \
-        	pos = pos->next)
-
-/**
- * __list_for_each	-	iterate over a list
- * @pos:	the &struct list_head to use as a loop cursor.
- * @head:	the head for your list.
- *
- * This variant differs from list_for_each() in that it's the
- * simplest possible list iteration code, no prefetching is done.
- * Use this for code that knows the list to be very short (empty
- * or 1 entry) most of the time.
- */
-#define __list_for_each(pos, head) \
-	for (pos = (head)->next; pos != (head); pos = pos->next)
-
-/**
- * list_for_each_prev	-	iterate over a list backwards
- * @pos:	the &struct list_head to use as a loop cursor.
- * @head:	the head for your list.
- */
-#define list_for_each_prev(pos, head) \
-	for (pos = (head)->prev; /*prefetch(pos->prev),*/ pos != (head); \
-        	pos = pos->prev)
-
-/**
- * list_for_each_safe - iterate over a list safe against removal of list entry
- * @pos:	the &struct list_head to use as a loop cursor.
- * @n:		another &struct list_head to use as temporary storage
- * @head:	the head for your list.
- */
-#define list_for_each_safe(pos, n, head) \
-	for (pos = (head)->next, n = pos->next; pos != (head); \
-		pos = n, n = pos->next)
-
-/**
- * list_for_each_prev_safe - iterate over a list backwards safe against removal of list entry
- * @pos:	the &struct list_head to use as a loop cursor.
- * @n:		another &struct list_head to use as temporary storage
- * @head:	the head for your list.
- */
-#define list_for_each_prev_safe(pos, n, head) \
-	for (pos = (head)->prev, n = pos->prev; \
-	     /*prefetch(pos->prev),*/ pos != (head); \
-	     pos = n, n = pos->prev)
-
-/**
  * list_for_each_entry	-	iterate over list of given type
  * @pos:	the type * to use as a loop cursor.
  * @head:	the head for your list.
@@ -380,139 +190,17 @@ static inline void list_splice_init(struct list_head *list,
 	     /*prefetch(pos->member.next),*/ &pos->member != (head); 	\
 	     pos = list_entry(pos->member.next, typeof(*pos), member))
 
-/**
- * list_for_each_entry_reverse - iterate backwards over list of given type.
- * @pos:	the type * to use as a loop cursor.
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- */
-#define list_for_each_entry_reverse(pos, head, member)			\
-	for (pos = list_entry((head)->prev, typeof(*pos), member);	\
-	     /*prefetch(pos->member.prev),*/ &pos->member != (head); 	\
-	     pos = list_entry(pos->member.prev, typeof(*pos), member))
 
-/**
- * list_prepare_entry - prepare a pos entry for use in list_for_each_entry_continue()
- * @pos:	the type * to use as a start point
- * @head:	the head of the list
- * @member:	the name of the list_struct within the struct.
- *
- * Prepares a pos entry for use as a start point in list_for_each_entry_continue().
- */
-#define list_prepare_entry(pos, head, member) \
-	((pos) ? : list_entry(head, typeof(*pos), member))
-
-/**
- * list_for_each_entry_continue - continue iteration over list of given type
- * @pos:	the type * to use as a loop cursor.
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- *
- * Continue to iterate over list of given type, continuing after
- * the current position.
- */
-#define list_for_each_entry_continue(pos, head, member) 		\
-	for (pos = list_entry(pos->member.next, typeof(*pos), member);	\
-	     /*prefetch(pos->member.next),*/ &pos->member != (head);	\
-	     pos = list_entry(pos->member.next, typeof(*pos), member))
-
-/**
- * list_for_each_entry_continue_reverse - iterate backwards from the given point
- * @pos:	the type * to use as a loop cursor.
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- *
- * Start to iterate over list of given type backwards, continuing after
- * the current position.
- */
-#define list_for_each_entry_continue_reverse(pos, head, member)		\
-	for (pos = list_entry(pos->member.prev, typeof(*pos), member);	\
-	     /*prefetch(pos->member.prev),*/ &pos->member != (head);	\
-	     pos = list_entry(pos->member.prev, typeof(*pos), member))
-
-/**
- * list_for_each_entry_from - iterate over list of given type from the current point
- * @pos:	the type * to use as a loop cursor.
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- *
- * Iterate over list of given type, continuing from current position.
- */
-#define list_for_each_entry_from(pos, head, member) 			\
-	for (; /*prefetch(pos->member.next),*/ &pos->member != (head);	\
-	     pos = list_entry(pos->member.next, typeof(*pos), member))
-
-/**
- * list_for_each_entry_safe - iterate over list of given type safe against removal of list entry
- * @pos:	the type * to use as a loop cursor.
- * @n:		another type * to use as temporary storage
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- */
-#define list_for_each_entry_safe(pos, n, head, member)			\
-	for (pos = list_entry((head)->next, typeof(*pos), member),	\
-		n = list_entry(pos->member.next, typeof(*pos), member);	\
-	     &pos->member != (head); 					\
-	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
-
-/**
- * list_for_each_entry_safe_continue
- * @pos:	the type * to use as a loop cursor.
- * @n:		another type * to use as temporary storage
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- *
- * Iterate over list of given type, continuing after current point,
- * safe against removal of list entry.
- */
-#define list_for_each_entry_safe_continue(pos, n, head, member) 		\
-	for (pos = list_entry(pos->member.next, typeof(*pos), member), 		\
-		n = list_entry(pos->member.next, typeof(*pos), member);		\
-	     &pos->member != (head);						\
-	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
-
-/**
- * list_for_each_entry_safe_from
- * @pos:	the type * to use as a loop cursor.
- * @n:		another type * to use as temporary storage
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- *
- * Iterate over list of given type from current point, safe against
- * removal of list entry.
- */
-#define list_for_each_entry_safe_from(pos, n, head, member) 			\
-	for (n = list_entry(pos->member.next, typeof(*pos), member);		\
-	     &pos->member != (head);						\
-	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
-
-/**
- * list_for_each_entry_safe_reverse
- * @pos:	the type * to use as a loop cursor.
- * @n:		another type * to use as temporary storage
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- *
- * Iterate backwards over list of given type, safe against removal
- * of list entry.
- */
-#define list_for_each_entry_safe_reverse(pos, n, head, member)		\
-	for (pos = list_entry((head)->prev, typeof(*pos), member),	\
-		n = list_entry(pos->member.prev, typeof(*pos), member);	\
-	     &pos->member != (head); 					\
-	     pos = n, n = list_entry(n->member.prev, typeof(*n), member))
-
-
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 /* Vector hash entry (for caches). */
 struct h_cache {
-	struct list_head  list;
-	struct h_bucket  *bucket;
-	struct h_table   *table;
-	struct list_head  idle_list;
+	struct list_head list;
+	struct h_bucket *bucket;
+	struct h_table *table;
+	struct list_head idle_list;
 	/* Time for the latest `h_entry_put()` operation. */
-	unsigned long     last_put;
+	time_t last_put;
 	int refs;
 };
 
@@ -522,7 +210,6 @@ struct h_bucket {
 
 enum __h_table_type {
 	H_TABLE_TYPE_CACHE,
-	H_TABLE_TYPE_SCALAR,
 };
 
 struct h_table {
@@ -536,7 +223,6 @@ struct h_table {
 	size_t    max_len;
 	size_t    len;
 	long      timeo;
-	
 	struct list_head idle_queue;
 };
 
@@ -556,90 +242,19 @@ static inline int h_table_len(struct h_table *ht)
 	return ht->len;
 }
 
-int h_table_iterate_safe(struct h_table *ht, void (*operate)(struct h_cache *),
-		int max_duration, int min_per_sec );
-
-int h_table_clear(struct h_table *ht);
-
-struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
-		struct h_cache *(*create)(struct h_table *, void *),
-		void (*modify)(struct h_cache *, void *) );
-
-static inline struct h_cache *h_entry_try_get(struct h_table *ht, void *key,
-		struct h_cache *(*create)(struct h_table *, void *),
-		void (*modify)(struct h_cache *, void *) )
-{
-	return __h_cache_try_get(ht, key, create, modify);
-}
-
-void h_entry_put(struct h_cache *he);
-void h_entry_put_free(struct h_cache *he);
-
-int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
-		struct h_bucket *base, size_t size, size_t max_len, long timeo,
-		struct h_operations *ops);
-
-static inline int h_table_create(struct h_table *ht,
-		struct h_bucket *base, size_t size, size_t max_len, long timeo,
-		struct h_operations *ops)
-{
-	return __h_table_create(ht, H_TABLE_TYPE_CACHE, base, size, max_len, timeo, ops);
-}
-
-int h_table_release(struct h_table *ht);
-
-
 static inline size_t h_table_len_inc(struct h_table *ht)
 {
-	size_t len;
-	len = ++ht->len;
+	size_t len = ++ht->len;
 	return len;
 }
 
 static inline size_t h_table_len_dec(struct h_table *ht)
 {
-	size_t len;
-	len = --ht->len;
+	size_t len = --ht->len;
 	return len;
 }
 
-int h_table_iterate_safe(struct h_table *ht, void (*operate)(struct h_cache *),
-		int max_duration, int min_per_sec )
-{
-	int i, count = 0;
-	struct h_bucket *b;
-	struct h_cache *he, *he_next;
-	int max_per_sec = 0;
-	time_t start_ts = time(NULL);
-
-	if (max_duration > 0) {
-		max_per_sec = ht->len / max_duration;
-		if(max_per_sec < min_per_sec)
-			max_per_sec = min_per_sec;
-	}
-	
-	for (i = 0; i < ht->size; i++) {
-		b = &ht->base[i];
-		list_for_each_entry_safe(he, he_next, &b->chain, list) {
-			if(operate)
-				operate(he);
-			count++;
-		}
-		
-		/* Check the iteration rate. */
-		if (max_duration > 0) {
-			while (count > max_per_sec * (time(NULL) - start_ts)) {
-				sleep(1);
-				//if(kthread_should_stop())
-				//	goto out;
-			}
-		}
-	}/* for(i = 0; i < ht->size; i++) */
-
-	return count;
-}
-
-struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
+static struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
 		struct h_cache *(*create)(struct h_table *, void *),
 		void (*modify)(struct h_cache *, void *) )
 {
@@ -650,7 +265,7 @@ struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
 		if (ht->ops->comp_key(he, key) == 0) {
 			/* Pop-up from idle queue when reference leaves 0. */
 			if (++he->refs == 1) {
-				if(!list_entry_orphan(&he->idle_list))
+				if (!list_entry_orphan(&he->idle_list))
 					list_del(&he->idle_list);
 			}
 			/* Invoke the call back to do modifications. */
@@ -689,7 +304,14 @@ struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
 	return he;
 }
 
-void h_entry_put(struct h_cache *he)
+static inline struct h_cache *h_entry_try_get(struct h_table *ht, void *key,
+		struct h_cache *(*create)(struct h_table *, void *),
+		void (*modify)(struct h_cache *, void *) )
+{
+	return __h_cache_try_get(ht, key, create, modify);
+}
+
+static void h_entry_put(struct h_cache *he)
 {
 	struct h_table *ht = he->table;
 	
@@ -706,25 +328,7 @@ void h_entry_put(struct h_cache *he)
 	}
 }
 
-void h_entry_put_free(struct h_cache *he)
-{
-	struct h_table *ht = he->table;
-	
-	if (--he->refs == 0) {
-		if (!list_entry_orphan(&he->idle_list)) {
-			fprintf(stderr, "%s(): entry(0x%08lx) is already in idle queue!\n",
-				__FUNCTION__, (unsigned long)he);
-		}
-		
-		list_del(&he->list);
-		
-		ht->ops->release(he);
-		h_table_len_dec(ht);
-	} else {
-	}
-}
-
-int h_table_clear(struct h_table *ht)
+static int h_table_clear(struct h_table *ht)
 {
 	int count = 0;
 	struct h_cache *he;
@@ -744,7 +348,7 @@ int h_table_clear(struct h_table *ht)
 	return count;
 }
 
-int h_table_release(struct h_table *ht)
+static int h_table_release(struct h_table *ht)
 {
 	size_t ht_len = ht->len;
 	
@@ -793,7 +397,7 @@ static void __h_table_timeo_check(struct h_table *ht)
  * return value:
 *   0 for success, <0 for error codes, use `errno` standards.
  */
-int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
+static int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
 		struct h_bucket *base, size_t size, size_t max_len, long timeo,
 		struct h_operations *ops)
 {
@@ -845,8 +449,15 @@ int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
 	return 0;
 }
 
+static inline int h_table_create(struct h_table *ht,
+		struct h_bucket *base, size_t size, size_t max_len, long timeo,
+		struct h_operations *ops)
+{
+	return __h_table_create(ht, H_TABLE_TYPE_CACHE, base, size, max_len, timeo, ops);
+}
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static char *get_sockaddr_pair(const void *addr,
 		char *host, int *port)
@@ -901,7 +512,8 @@ static int set_nonblock(int sfd)
 	return 0;
 }
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 #define EPOLL_TABLE_SIZE 2048
 #define MAX_POLL_EVENTS 100
@@ -910,10 +522,9 @@ static struct sockaddr_storage g_src_sockaddr;
 static struct sockaddr_storage g_dst_sockaddr;
 static socklen_t g_src_addrlen;
 static socklen_t g_dst_addrlen;
+static struct h_table g_conn_tbl;
 static int g_lsn_sock = -1;
 static int g_epfd = -1;
-
-static struct h_table g_conn_tbl;
 
 /**
  * Connection tracking information to indicate
@@ -1016,7 +627,6 @@ static void __proxy_conn_modify_fn(struct h_cache *he, void *key)
 
 
 
-
 /**
  * Get 'conn' structure by passing the ev.data.ptr
  * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
@@ -1100,7 +710,6 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 	conn->svr_addr = g_dst_sockaddr;
 
 	get_sockaddr_pair(&conn->cli_addr, s1, &n1);
-	printf("-- Client [%s]:%d entered\n", s1, n1);
 	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		g_dst_addrlen)) == 0) {
@@ -1163,7 +772,7 @@ static int get_sockaddr_v4v6(const char *node, int port,
 	return 0;
 }
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static void show_help(int argc, char *argv[])
 {
@@ -1270,7 +879,7 @@ int main(int argc, char *argv[])
 		do_daemonize();
 
 	/* Create session hash table. */
-	rc = h_table_create(&g_conn_tbl, NULL, 512, 2048, 10, &proxy_conn_hops);
+	rc = h_table_create(&g_conn_tbl, NULL, 512, 2048, 60, &proxy_conn_hops);
 	if (rc < 0) {
 		fprintf(stderr, "*** h_table_create() failed.\n");
 		exit(1);
@@ -1304,7 +913,7 @@ int main(int argc, char *argv[])
 			struct proxy_conn *conn;
 			int rlen;
 			
-			/* NULL evp->data.ptr indicates this socket is closed. */
+			/* NULL evp->data.ptr indicates this connection is closed. */
 			if (evptr == NULL)
 				continue;
 			
@@ -1318,7 +927,7 @@ int main(int argc, char *argv[])
 				if (!(conn = get_conn_by_cli_addr(&cli_addr)))
 					continue;
 				send(conn->svr_sock, buffer, (size_t)rlen, 0);
-				/* FIXME: Need to care about 'rc'? */
+				/* FIXME: Need to care 'rc'? */
 			} else {
 				/* Data from server. */
 				conn = get_conn_by_evptr(evptr);
@@ -1343,6 +952,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	h_table_release(&g_conn_tbl);
+	
 	return 0;
 }
 

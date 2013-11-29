@@ -7,7 +7,7 @@ tcpfwd: tcpfwd.o
 	$(CC) -o $@ $^ $(LDFLAGS) -levent
 
 udpfwd: udpfwd.o
-	$(CC) -o $@ $^ $(LDFLAGS) -levent -lpthread
+	$(CC) -o $@ $^ $(LDFLAGS) -levent
 
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
@@ -17,5 +17,5 @@ install: tcpfwd
 	cp -vf tcpfwd /usr/local/bin/
 
 clean:
-	rm -f tcpfwd *.o
+	rm -f tcpfwd udpfwd *.o
 
