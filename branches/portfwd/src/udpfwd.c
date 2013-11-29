@@ -15,20 +15,838 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <pthread.h>
+#include <time.h>
 
 typedef int bool;
 #define true  1
 #define false 0
 
-//static unsigned int   g_source_ip   = 0;
-//static unsigned short g_source_port = 0;
-//static unsigned int   g_dest_ip     = 0;
-//static unsigned short g_dest_port   = 0;
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
-static struct sockaddr_storage g_src_sockaddr;
-static struct sockaddr_storage g_dst_sockaddr;
-static socklen_t g_src_addrlen;
-static socklen_t g_dst_addrlen;
+#include <sys/types.h>
+#include <stddef.h>
+
+/**
+ * container_of - cast a member of a structure out to the containing structure
+ * @ptr:	the pointer to the member.
+ * @type:	the type of the container struct this is embedded in.
+ * @member:	the name of the member within the struct.
+ *
+ */
+#define container_of(ptr, type, member) ({			\
+	const typeof(((type *)0)->member) * __mptr = (ptr);	\
+	(type *)((char *)__mptr - offsetof(type, member)); })
+
+/*
+ * These are non-NULL pointers that will result in page faults
+ * under normal circumstances, used to verify that nobody uses
+ * non-initialized list entries.
+ */
+#define LIST_POISON1  ((void *) 0x00100100)
+#define LIST_POISON2  ((void *) 0x00200200)
+
+/*
+ * Simple doubly linked list implementation.
+ *
+ * Some of the internal functions ("__xxx") are useful when
+ * manipulating whole lists rather than single entries, as
+ * sometimes we already know the next/prev entries and we can
+ * generate better code by using them directly rather than
+ * using the generic single-entry routines.
+ */
+
+struct list_head {
+	struct list_head *next, *prev;
+};
+
+#define LIST_HEAD_INIT(name) { &(name), &(name) }
+
+#define LIST_HEAD(name) \
+	struct list_head name = LIST_HEAD_INIT(name)
+
+static inline void INIT_LIST_HEAD(struct list_head *list)
+{
+	list->next = list;
+	list->prev = list;
+}
+
+/* ------------------------------------------------------- */
+static inline void init_list_entry(struct list_head *entry)
+{
+	entry->next = LIST_POISON1;
+	entry->prev = LIST_POISON2;
+}
+static inline int list_entry_orphan(struct list_head *entry)
+{
+	return entry->next == LIST_POISON1;
+}
+/* ------------------------------------------------------- */
+
+/*
+ * Insert a new entry between two known consecutive entries.
+ *
+ * This is only for internal list manipulation where we know
+ * the prev/next entries already!
+ */
+static inline void __list_add(struct list_head *new,
+			      struct list_head *prev,
+			      struct list_head *next)
+{
+	next->prev = new;
+	new->next = next;
+	new->prev = prev;
+	prev->next = new;
+}
+
+/**
+ * list_add - add a new entry
+ * @new: new entry to be added
+ * @head: list head to add it after
+ *
+ * Insert a new entry after the specified head.
+ * This is good for implementing stacks.
+ */
+static inline void list_add(struct list_head *new, struct list_head *head)
+{
+	__list_add(new, head, head->next);
+}
+
+/**
+ * list_add_tail - add a new entry
+ * @new: new entry to be added
+ * @head: list head to add it before
+ *
+ * Insert a new entry before the specified head.
+ * This is useful for implementing queues.
+ */
+static inline void list_add_tail(struct list_head *new, struct list_head *head)
+{
+	__list_add(new, head->prev, head);
+}
+
+/*
+ * Delete a list entry by making the prev/next entries
+ * point to each other.
+ *
+ * This is only for internal list manipulation where we know
+ * the prev/next entries already!
+ */
+static inline void __list_del(struct list_head * prev, struct list_head * next)
+{
+	next->prev = prev;
+	prev->next = next;
+}
+
+/**
+ * list_del - deletes entry from list.
+ * @entry: the element to delete from the list.
+ * Note: list_empty() on entry does not return true after this, the entry is
+ * in an undefined state.
+ */
+static inline void list_del(struct list_head *entry)
+{
+	__list_del(entry->prev, entry->next);
+	entry->next = LIST_POISON1;
+	entry->prev = LIST_POISON2;
+}
+
+/**
+ * list_replace - replace old entry by new one
+ * @old : the element to be replaced
+ * @new : the new element to insert
+ *
+ * If @old was empty, it will be overwritten.
+ */
+static inline void list_replace(struct list_head *old,
+				struct list_head *new)
+{
+	new->next = old->next;
+	new->next->prev = new;
+	new->prev = old->prev;
+	new->prev->next = new;
+}
+
+static inline void list_replace_init(struct list_head *old,
+					struct list_head *new)
+{
+	list_replace(old, new);
+	INIT_LIST_HEAD(old);
+}
+
+/**
+ * list_del_init - deletes entry from list and reinitialize it.
+ * @entry: the element to delete from the list.
+ */
+static inline void list_del_init(struct list_head *entry)
+{
+	__list_del(entry->prev, entry->next);
+	INIT_LIST_HEAD(entry);
+}
+
+/**
+ * list_move - delete from one list and add as another's head
+ * @list: the entry to move
+ * @head: the head that will precede our entry
+ */
+static inline void list_move(struct list_head *list, struct list_head *head)
+{
+	__list_del(list->prev, list->next);
+	list_add(list, head);
+}
+
+/**
+ * list_move_tail - delete from one list and add as another's tail
+ * @list: the entry to move
+ * @head: the head that will follow our entry
+ */
+static inline void list_move_tail(struct list_head *list,
+				  struct list_head *head)
+{
+	__list_del(list->prev, list->next);
+	list_add_tail(list, head);
+}
+
+/**
+ * list_is_last - tests whether @list is the last entry in list @head
+ * @list: the entry to test
+ * @head: the head of the list
+ */
+static inline int list_is_last(const struct list_head *list,
+				const struct list_head *head)
+{
+	return list->next == head;
+}
+
+/**
+ * list_empty - tests whether a list is empty
+ * @head: the list to test.
+ */
+static inline int list_empty(const struct list_head *head)
+{
+	return head->next == head;
+}
+
+/**
+ * list_empty_careful - tests whether a list is empty and not being modified
+ * @head: the list to test
+ *
+ * Description:
+ * tests whether a list is empty _and_ checks that no other CPU might be
+ * in the process of modifying either member (next or prev)
+ *
+ * NOTE: using list_empty_careful() without synchronization
+ * can only be safe if the only activity that can happen
+ * to the list entry is list_del_init(). Eg. it cannot be used
+ * if another CPU could re-list_add() it.
+ */
+static inline int list_empty_careful(const struct list_head *head)
+{
+	struct list_head *next = head->next;
+	return (next == head) && (next == head->prev);
+}
+
+/**
+ * list_is_singular - tests whether a list has just one entry.
+ * @head: the list to test.
+ */
+static inline int list_is_singular(const struct list_head *head)
+{
+	return !list_empty(head) && (head->next == head->prev);
+}
+
+static inline void __list_splice(const struct list_head *list,
+				 struct list_head *head)
+{
+	struct list_head *first = list->next;
+	struct list_head *last = list->prev;
+	struct list_head *at = head->next;
+
+	first->prev = head;
+	head->next = first;
+
+	last->next = at;
+	at->prev = last;
+}
+
+/**
+ * list_splice - join two lists
+ * @list: the new list to add.
+ * @head: the place to add it in the first list.
+ */
+static inline void list_splice(const struct list_head *list,
+				struct list_head *head)
+{
+	if (!list_empty(list))
+		__list_splice(list, head);
+}
+
+/**
+ * list_splice_init - join two lists and reinitialise the emptied list.
+ * @list: the new list to add.
+ * @head: the place to add it in the first list.
+ *
+ * The list at @list is reinitialised
+ */
+static inline void list_splice_init(struct list_head *list,
+				    struct list_head *head)
+{
+	if (!list_empty(list)) {
+		__list_splice(list, head);
+		INIT_LIST_HEAD(list);
+	}
+}
+
+/**
+ * list_entry - get the struct for this entry
+ * @ptr:	the &struct list_head pointer.
+ * @type:	the type of the struct this is embedded in.
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_entry(ptr, type, member) \
+	container_of(ptr, type, member)
+
+/**
+ * list_first_entry - get the first element from a list
+ * @ptr:	the list head to take the element from.
+ * @type:	the type of the struct this is embedded in.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Note, that list is expected to be not empty.
+ */
+#define list_first_entry(ptr, type, member) \
+	list_entry((ptr)->next, type, member)
+
+/**
+ * list_for_each	-	iterate over a list
+ * @pos:	the &struct list_head to use as a loop cursor.
+ * @head:	the head for your list.
+ */
+#define list_for_each(pos, head) \
+	for (pos = (head)->next; /*prefetch(pos->next),*/ pos != (head); \
+        	pos = pos->next)
+
+/**
+ * __list_for_each	-	iterate over a list
+ * @pos:	the &struct list_head to use as a loop cursor.
+ * @head:	the head for your list.
+ *
+ * This variant differs from list_for_each() in that it's the
+ * simplest possible list iteration code, no prefetching is done.
+ * Use this for code that knows the list to be very short (empty
+ * or 1 entry) most of the time.
+ */
+#define __list_for_each(pos, head) \
+	for (pos = (head)->next; pos != (head); pos = pos->next)
+
+/**
+ * list_for_each_prev	-	iterate over a list backwards
+ * @pos:	the &struct list_head to use as a loop cursor.
+ * @head:	the head for your list.
+ */
+#define list_for_each_prev(pos, head) \
+	for (pos = (head)->prev; /*prefetch(pos->prev),*/ pos != (head); \
+        	pos = pos->prev)
+
+/**
+ * list_for_each_safe - iterate over a list safe against removal of list entry
+ * @pos:	the &struct list_head to use as a loop cursor.
+ * @n:		another &struct list_head to use as temporary storage
+ * @head:	the head for your list.
+ */
+#define list_for_each_safe(pos, n, head) \
+	for (pos = (head)->next, n = pos->next; pos != (head); \
+		pos = n, n = pos->next)
+
+/**
+ * list_for_each_prev_safe - iterate over a list backwards safe against removal of list entry
+ * @pos:	the &struct list_head to use as a loop cursor.
+ * @n:		another &struct list_head to use as temporary storage
+ * @head:	the head for your list.
+ */
+#define list_for_each_prev_safe(pos, n, head) \
+	for (pos = (head)->prev, n = pos->prev; \
+	     /*prefetch(pos->prev),*/ pos != (head); \
+	     pos = n, n = pos->prev)
+
+/**
+ * list_for_each_entry	-	iterate over list of given type
+ * @pos:	the type * to use as a loop cursor.
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_for_each_entry(pos, head, member)				\
+	for (pos = list_entry((head)->next, typeof(*pos), member);	\
+	     /*prefetch(pos->member.next),*/ &pos->member != (head); 	\
+	     pos = list_entry(pos->member.next, typeof(*pos), member))
+
+/**
+ * list_for_each_entry_reverse - iterate backwards over list of given type.
+ * @pos:	the type * to use as a loop cursor.
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_for_each_entry_reverse(pos, head, member)			\
+	for (pos = list_entry((head)->prev, typeof(*pos), member);	\
+	     /*prefetch(pos->member.prev),*/ &pos->member != (head); 	\
+	     pos = list_entry(pos->member.prev, typeof(*pos), member))
+
+/**
+ * list_prepare_entry - prepare a pos entry for use in list_for_each_entry_continue()
+ * @pos:	the type * to use as a start point
+ * @head:	the head of the list
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Prepares a pos entry for use as a start point in list_for_each_entry_continue().
+ */
+#define list_prepare_entry(pos, head, member) \
+	((pos) ? : list_entry(head, typeof(*pos), member))
+
+/**
+ * list_for_each_entry_continue - continue iteration over list of given type
+ * @pos:	the type * to use as a loop cursor.
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Continue to iterate over list of given type, continuing after
+ * the current position.
+ */
+#define list_for_each_entry_continue(pos, head, member) 		\
+	for (pos = list_entry(pos->member.next, typeof(*pos), member);	\
+	     /*prefetch(pos->member.next),*/ &pos->member != (head);	\
+	     pos = list_entry(pos->member.next, typeof(*pos), member))
+
+/**
+ * list_for_each_entry_continue_reverse - iterate backwards from the given point
+ * @pos:	the type * to use as a loop cursor.
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Start to iterate over list of given type backwards, continuing after
+ * the current position.
+ */
+#define list_for_each_entry_continue_reverse(pos, head, member)		\
+	for (pos = list_entry(pos->member.prev, typeof(*pos), member);	\
+	     /*prefetch(pos->member.prev),*/ &pos->member != (head);	\
+	     pos = list_entry(pos->member.prev, typeof(*pos), member))
+
+/**
+ * list_for_each_entry_from - iterate over list of given type from the current point
+ * @pos:	the type * to use as a loop cursor.
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Iterate over list of given type, continuing from current position.
+ */
+#define list_for_each_entry_from(pos, head, member) 			\
+	for (; /*prefetch(pos->member.next),*/ &pos->member != (head);	\
+	     pos = list_entry(pos->member.next, typeof(*pos), member))
+
+/**
+ * list_for_each_entry_safe - iterate over list of given type safe against removal of list entry
+ * @pos:	the type * to use as a loop cursor.
+ * @n:		another type * to use as temporary storage
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_for_each_entry_safe(pos, n, head, member)			\
+	for (pos = list_entry((head)->next, typeof(*pos), member),	\
+		n = list_entry(pos->member.next, typeof(*pos), member);	\
+	     &pos->member != (head); 					\
+	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
+
+/**
+ * list_for_each_entry_safe_continue
+ * @pos:	the type * to use as a loop cursor.
+ * @n:		another type * to use as temporary storage
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Iterate over list of given type, continuing after current point,
+ * safe against removal of list entry.
+ */
+#define list_for_each_entry_safe_continue(pos, n, head, member) 		\
+	for (pos = list_entry(pos->member.next, typeof(*pos), member), 		\
+		n = list_entry(pos->member.next, typeof(*pos), member);		\
+	     &pos->member != (head);						\
+	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
+
+/**
+ * list_for_each_entry_safe_from
+ * @pos:	the type * to use as a loop cursor.
+ * @n:		another type * to use as temporary storage
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Iterate over list of given type from current point, safe against
+ * removal of list entry.
+ */
+#define list_for_each_entry_safe_from(pos, n, head, member) 			\
+	for (n = list_entry(pos->member.next, typeof(*pos), member);		\
+	     &pos->member != (head);						\
+	     pos = n, n = list_entry(n->member.next, typeof(*n), member))
+
+/**
+ * list_for_each_entry_safe_reverse
+ * @pos:	the type * to use as a loop cursor.
+ * @n:		another type * to use as temporary storage
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ *
+ * Iterate backwards over list of given type, safe against removal
+ * of list entry.
+ */
+#define list_for_each_entry_safe_reverse(pos, n, head, member)		\
+	for (pos = list_entry((head)->prev, typeof(*pos), member),	\
+		n = list_entry(pos->member.prev, typeof(*pos), member);	\
+	     &pos->member != (head); 					\
+	     pos = n, n = list_entry(n->member.prev, typeof(*n), member))
+
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+
+/* Vector hash entry (for caches). */
+struct h_cache {
+	struct list_head  list;
+	struct h_bucket  *bucket;
+	struct h_table   *table;
+	struct list_head  idle_list;
+	/* Time for the latest `h_entry_put()` operation. */
+	unsigned long     last_put;
+	int refs;
+};
+
+struct h_bucket {
+	struct list_head chain;
+};
+
+enum __h_table_type {
+	H_TABLE_TYPE_CACHE,
+	H_TABLE_TYPE_SCALAR,
+};
+
+struct h_table {
+	int table_type;
+	union {
+		struct h_operations *ops;
+	};
+	struct h_bucket *base;
+	bool      static_base;
+	size_t    size;
+	size_t    max_len;
+	size_t    len;
+	long      timeo;
+	
+	struct list_head idle_queue;
+};
+
+/* Hash table operation collections. */
+struct h_operations {
+	unsigned int (*hash)(void *key);
+	int   (*comp_key)(struct h_cache *he, void *key);
+	void  (*release)(struct h_cache *he);
+	char *(*build_line)(struct h_cache *he);
+	int   (*operate_cmd)(struct h_table *ht, const char *cmd);
+};
+
+/* Exported operations. */
+
+static inline int h_table_len(struct h_table *ht)
+{
+	return ht->len;
+}
+
+int h_table_iterate_safe(struct h_table *ht, void (*operate)(struct h_cache *),
+		int max_duration, int min_per_sec );
+
+int h_table_clear(struct h_table *ht);
+
+struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
+		struct h_cache *(*create)(struct h_table *, void *),
+		void (*modify)(struct h_cache *, void *) );
+
+static inline struct h_cache *h_entry_try_get(struct h_table *ht, void *key,
+		struct h_cache *(*create)(struct h_table *, void *),
+		void (*modify)(struct h_cache *, void *) )
+{
+	return __h_cache_try_get(ht, key, create, modify);
+}
+
+void h_entry_put(struct h_cache *he);
+void h_entry_put_free(struct h_cache *he);
+
+int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
+		struct h_bucket *base, size_t size, size_t max_len, long timeo,
+		struct h_operations *ops);
+
+static inline int h_table_create(struct h_table *ht,
+		struct h_bucket *base, size_t size, size_t max_len, long timeo,
+		struct h_operations *ops)
+{
+	return __h_table_create(ht, H_TABLE_TYPE_CACHE, base, size, max_len, timeo, ops);
+}
+
+int h_table_release(struct h_table *ht);
+
+
+static inline size_t h_table_len_inc(struct h_table *ht)
+{
+	size_t len;
+	len = ++ht->len;
+	return len;
+}
+
+static inline size_t h_table_len_dec(struct h_table *ht)
+{
+	size_t len;
+	len = --ht->len;
+	return len;
+}
+
+int h_table_iterate_safe(struct h_table *ht, void (*operate)(struct h_cache *),
+		int max_duration, int min_per_sec )
+{
+	int i, count = 0;
+	struct h_bucket *b;
+	struct h_cache *he, *he_next;
+	int max_per_sec = 0;
+	time_t start_ts = time(NULL);
+
+	if (max_duration > 0) {
+		max_per_sec = ht->len / max_duration;
+		if(max_per_sec < min_per_sec)
+			max_per_sec = min_per_sec;
+	}
+	
+	for (i = 0; i < ht->size; i++) {
+		b = &ht->base[i];
+		list_for_each_entry_safe(he, he_next, &b->chain, list) {
+			if(operate)
+				operate(he);
+			count++;
+		}
+		
+		/* Check the iteration rate. */
+		if (max_duration > 0) {
+			while (count > max_per_sec * (time(NULL) - start_ts)) {
+				sleep(1);
+				//if(kthread_should_stop())
+				//	goto out;
+			}
+		}
+	}/* for(i = 0; i < ht->size; i++) */
+
+	return count;
+}
+
+struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
+		struct h_cache *(*create)(struct h_table *, void *),
+		void (*modify)(struct h_cache *, void *) )
+{
+	struct h_bucket *b = &ht->base[ht->ops->hash(key) & (ht->size - 1)];
+	struct h_cache *he;
+	
+	list_for_each_entry(he, &b->chain, list) {
+		if (ht->ops->comp_key(he, key) == 0) {
+			/* Pop-up from idle queue when reference leaves 0. */
+			if (++he->refs == 1) {
+				if(!list_entry_orphan(&he->idle_list))
+					list_del(&he->idle_list);
+			}
+			/* Invoke the call back to do modifications. */
+			if (modify)
+				modify(he, key);
+			return he;
+		}
+	}
+	
+	/* Not found, try to create a new entry. */
+	if (create == NULL) {
+		return NULL;
+	}
+	
+	/* If the table is full, try to recycle idle entries. */
+	if (h_table_len(ht) >= ht->max_len) {
+		fprintf(stderr, "-- ht->len: %d, ht->max_len: %d\n", (int)ht->len, (int)ht->max_len);
+		return NULL;
+	}
+	
+	if ((he = create(ht, key)) == NULL) {
+		return NULL;
+	}
+	/* Initialize the base class. */
+	he->bucket = b;
+	he->table = ht;
+	init_list_entry(&he->list);
+	//init_timer(&he->timer);
+	init_list_entry(&he->idle_list);
+	he->last_put = 0;
+	he->refs = 1;
+	list_add(&he->list, &b->chain);
+	
+	h_table_len_inc(ht);
+	
+	return he;
+}
+
+void h_entry_put(struct h_cache *he)
+{
+	struct h_table *ht = he->table;
+	
+	if (--he->refs == 0) {
+		/* Push unused entry to TAIL of the idle queue. */
+		if (list_entry_orphan(&he->idle_list)) {
+			/* Timer will check this to determine when it should be removed. */
+			he->last_put = time(NULL);
+			list_add_tail(&he->idle_list, &ht->idle_queue);
+		} else {
+			fprintf(stderr, "%s(): entry(0x%08lx) is already in idle queue!\n",
+				__FUNCTION__, (unsigned long)he);
+		}
+	}
+}
+
+void h_entry_put_free(struct h_cache *he)
+{
+	struct h_table *ht = he->table;
+	
+	if (--he->refs == 0) {
+		if (!list_entry_orphan(&he->idle_list)) {
+			fprintf(stderr, "%s(): entry(0x%08lx) is already in idle queue!\n",
+				__FUNCTION__, (unsigned long)he);
+		}
+		
+		list_del(&he->list);
+		
+		ht->ops->release(he);
+		h_table_len_dec(ht);
+	} else {
+	}
+}
+
+int h_table_clear(struct h_table *ht)
+{
+	int count = 0;
+	struct h_cache *he;
+	
+	while (!list_empty(&ht->idle_queue)) {
+		he = list_first_entry(&ht->idle_queue, struct h_cache, idle_list);
+
+		list_del(&he->idle_list);
+		list_del(&he->list);
+
+		ht->ops->release(he);
+		h_table_len_dec(ht);
+
+		count++;
+	}
+
+	return count;
+}
+
+int h_table_release(struct h_table *ht)
+{
+	size_t ht_len = ht->len;
+	
+	if (ht->base) {
+		if (h_table_clear(ht) != ht_len)
+			return -EFAULT;
+		if (!ht->static_base)
+			free(ht->base);
+		ht->base = NULL;
+	}
+	ht->size = 0;
+	
+	return 0;
+}
+
+static void __h_table_timeo_check(struct h_table *ht)
+{
+	struct h_cache *he;
+
+	while (!list_empty(&ht->idle_queue)) {
+		he = list_first_entry(&ht->idle_queue, struct h_cache, idle_list);
+
+		if ((time(NULL) - he->last_put <= ht->timeo) &&
+			(h_table_len(ht) < ht->max_len * 9 / 10) )
+			break;
+
+		list_del(&he->idle_list);
+		list_del(&he->list);
+
+		ht->ops->release(he);
+		h_table_len_dec(ht);
+	} /* while(!list_empty(&ht->idle_queue)) */
+	
+	printf("-- Live entries: %d\n", ht->len);
+}
+
+/*
+ * h_table_create: Initialize a new hash table.
+ * Parameters: 
+ *  @ht: `h_table` structure, already allocated or static,
+ *  @base: optional argument, used for large sized hash table,
+ *  @size: hash size,
+ *  @max_len: maximum entries,
+ *  @timeo: idle timeout secs.,
+ *  @ops: operation collections for hash table.
+ * return value:
+*   0 for success, <0 for error codes, use `errno` standards.
+ */
+int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
+		struct h_bucket *base, size_t size, size_t max_len, long timeo,
+		struct h_operations *ops)
+{
+	struct h_bucket *b;
+	size_t __size;
+	int i;
+	
+	memset(ht, 0x0, sizeof(ht[0]));
+	
+	for (__size = size - 1, i = 0; __size; __size >>= 1, i++);
+	__size = (1UL << i);
+	if (size != __size) {
+		fprintf(stderr, "%s() Warning: size '%lu' is accepted as '%lu'.\n",
+			__FUNCTION__, (unsigned long)size, (unsigned long)__size);
+		size = __size;
+	}
+	
+	if (base) {
+		ht->base = base;
+		ht->static_base = true;
+	} else {
+		if ((ht->base = (struct h_bucket *)malloc(sizeof(struct h_bucket) * size)) == NULL)
+			return -ENOMEM;
+		ht->static_base = false;
+	}
+	
+	for (i = 0; i < size; i++) {
+		b = &ht->base[i];
+		INIT_LIST_HEAD(&b->chain);
+	}
+	ht->size  = size;
+	ht->max_len = max_len;
+	ht->timeo = timeo;
+	ht->ops   = ops;
+	ht->len   = 0;
+	
+	/* Initialization for idle queue. */
+	INIT_LIST_HEAD(&ht->idle_queue);
+
+	switch (table_type) {
+	case H_TABLE_TYPE_CACHE:
+		ht->table_type = table_type;
+		break;
+	default:
+		fprintf(stderr, "Invalid table type %d.\n", table_type);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static char *get_sockaddr_pair(const void *addr,
 		char *host, int *port)
@@ -78,76 +896,126 @@ static int do_daemonize(void)
 
 static int set_nonblock(int sfd)
 {
-	if (fcntl(sfd, F_SETFL,
-		fcntl(sfd, F_GETFD, 0) | O_NONBLOCK) == -1)
+	if (fcntl(sfd, F_SETFL, fcntl(sfd, F_GETFD, 0) | O_NONBLOCK) == -1)
 		return -1;
 	return 0;
 }
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 #define EPOLL_TABLE_SIZE 2048
 #define MAX_POLL_EVENTS 100
 
-#define container_of(ptr, type, member) ({			\
-	const typeof(((type *)0)->member) * __mptr = (ptr);	\
-	(type *)((char *)__mptr - offsetof(type, member)); })
+static struct sockaddr_storage g_src_sockaddr;
+static struct sockaddr_storage g_dst_sockaddr;
+static socklen_t g_src_addrlen;
+static socklen_t g_dst_addrlen;
+static int g_lsn_sock = -1;
+static int g_epfd = -1;
 
-/* Statues indicators of proxy sessions. */
-enum conn_state {
-	S_INVALID,
-	S_SERVER_CONNECTING,
-	S_SERVER_CONNECTED,
-	S_FORWARDING,
-	S_CLOSING,
-};
-
-enum ev_magic {
-	EV_MAGIC_LISTENER = 0x1010,
-	EV_MAGIC_CLIENT = 0x2010,
-	EV_MAGIC_SERVER = 0x3020,
-};
-
-struct buffer_info {
-	char *buf;
-	unsigned rpos;
-	unsigned dlen;
-	unsigned size;
-};
-
-#define REQ_BUFFER_SIZE 8192
-#define RSP_BUFFER_SIZE 8192
+static struct h_table g_conn_tbl;
 
 /**
  * Connection tracking information to indicate
  *  a proxy session.
  */
 struct proxy_conn {
-	int cli_sock;
+	struct h_cache h_cache;
+	time_t last_active;
 	int svr_sock;
-
-	/**
-	 * The two fields are used when an epoll event occur,
-	 *  to know on which socket fd it is triggered,
-	 *  client or server.
-	 *  ev.data.ptr = &ct.ev_client;
-	 */
-	int ev_client;
-	int ev_server;
-	unsigned short state;
-
 	/* Memorize the session addresses. */
 	struct sockaddr_storage cli_addr;
 	struct sockaddr_storage svr_addr;
-
-	/* To know if the fds are already added to epoll. */
-	bool client_in_ep;
-	bool server_in_ep;
-
-	/* Buffers for both direction. */
-	struct buffer_info request;
-	struct buffer_info response;
 };
+
+static inline void release_proxy_conn(struct proxy_conn *conn,
+		struct epoll_event *pending_evs, int pending_fds);
+static inline struct proxy_conn *alloc_proxy_conn(void);
+static struct proxy_conn *new_connection(int lsn_sock, int epfd,
+		struct sockaddr_storage *cli_addr, int *error);
+
+static unsigned int proxy_conn_hash_fn(void *key)
+{
+	const union __sa_union {
+		struct sockaddr_storage ss;
+		struct sockaddr_in sa4;
+		struct sockaddr_in6 sa6;
+	} *sa = key;
+	unsigned int hash = 0;
+	
+	if (sa->ss.ss_family == AF_INET) {
+		hash = ntohl(sa->sa4.sin_addr.s_addr) +
+			ntohs(sa->sa4.sin_port);		
+	} else if (sa->ss.ss_family == AF_INET6) {
+		int i;
+		for (i = 0; i < 4; i++)
+			hash += sa->sa6.sin6_addr.s6_addr32[i];
+		hash += ntohs(sa->sa6.sin6_port);
+	}
+	
+	return hash;
+}
+
+static int proxy_conn_key_cmp_fn(struct h_cache *he, void *key)
+{
+	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
+	const union __sa_union {
+		struct sockaddr_storage ss;
+		struct sockaddr_in sa4;
+		struct sockaddr_in6 sa6;
+	} *sa = key, *k = (void *)&conn->cli_addr;
+	
+	if (sa->ss.ss_family != k->ss.ss_family)
+		return 1;
+	
+	if (sa->ss.ss_family == AF_INET) {
+		if (sa->sa4.sin_addr.s_addr != k->sa4.sin_addr.s_addr)
+			return 1;
+		if (sa->sa4.sin_port != k->sa4.sin_port)
+			return 1;
+		return 0;
+	} else if (sa->ss.ss_family == AF_INET6) {
+		if (memcmp(&sa->sa6.sin6_addr, &k->sa6.sin6_addr, sizeof(k->sa6.sin6_addr)))
+			return 1;
+		if (sa->sa6.sin6_port != k->sa6.sin6_port)
+			return 1;
+		return 0;
+	}
+	
+	return 0;
+}
+
+static void proxy_conn_release_fn(struct h_cache *he)
+{
+	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
+	release_proxy_conn(conn, NULL, 0);
+}
+
+static struct h_operations proxy_conn_hops = {
+	.hash        = proxy_conn_hash_fn,
+	.comp_key    = proxy_conn_key_cmp_fn,
+	.release     = proxy_conn_release_fn,
+};
+
+static struct h_cache *__proxy_conn_create_fn(struct h_table *ht, void *key)
+{
+	struct sockaddr_storage *cli_addr = key;
+	struct proxy_conn *conn;
+	int rc;
+
+	if (!(conn = new_connection(g_lsn_sock, g_epfd, cli_addr, &rc)))
+		return NULL;
+	return &conn->h_cache;
+}
+
+static void __proxy_conn_modify_fn(struct h_cache *he, void *key)
+{
+	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
+	conn->last_active = time(NULL);
+}
+
+
+
 
 /**
  * Get 'conn' structure by passing the ev.data.ptr
@@ -156,13 +1024,7 @@ struct proxy_conn {
  */
 static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
 {
-	if (*evptr == EV_MAGIC_CLIENT)
-		return container_of(evptr, struct proxy_conn, ev_client);
-	else if (*evptr == EV_MAGIC_SERVER)
-		return container_of(evptr, struct proxy_conn, ev_server);
-	else
-		assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
-	return NULL;
+	return (struct proxy_conn *)evptr;
 }
 
 static inline struct proxy_conn *alloc_proxy_conn(void)
@@ -172,14 +1034,8 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
 	if (!(conn = malloc(sizeof(*conn))))
 		return NULL;
 	memset(conn, 0x0, sizeof(*conn));
-	conn->cli_sock = -1;
 	conn->svr_sock = -1;
-	conn->ev_client = EV_MAGIC_CLIENT;
-	conn->ev_server = EV_MAGIC_SERVER;
-	conn->state = S_INVALID;
-	conn->client_in_ep = false;
-	conn->server_in_ep = false;
-
+	conn->last_active = time(NULL);
 	return conn;
 }
 
@@ -198,118 +1054,37 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 	 *  connection. The event must be cleared or an invalid
 	 *  pointer might be accessed.
 	 */
-	if (conn->client_in_ep || conn->server_in_ep) {
-		for (i = 0; i < pending_fds; i++) {
-			ev = &pending_evs[i];
-			if (ev->data.ptr == &conn->ev_client ||
-				ev->data.ptr == &conn->ev_server) {
-				ev->data.ptr = NULL;
-				break;
-			}
+	for (i = 0; i < pending_fds; i++) {
+		ev = &pending_evs[i];
+		if (ev->data.ptr == (void *)conn) {
+			ev->data.ptr = NULL;
+			break;
 		}
 	}
 	
-	if (conn->cli_sock >= 0)
-		close(conn->cli_sock);
 	if (conn->svr_sock >= 0)
 		close(conn->svr_sock);
-	
-	if (conn->request.buf)
-		free(conn->request.buf);
-	if (conn->response.buf)
-		free(conn->response.buf);
 	
 	free(conn);
 }
 
-/**
- * Add or activate the epoll fds according to the status of
- *  'conn'. Different conn->state and buffer status will
- *  affect the polling behaviors.
- */
-static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
+static struct proxy_conn *new_connection(int lsn_sock, int epfd,
+		struct sockaddr_storage *cli_addr, int *error)
 {
-	struct epoll_event ev_cli, ev_svr;
-	
-	ev_cli.events = 0;
-	ev_svr.events = 0;
-	
-	switch(conn->state) {
-		case S_FORWARDING:
-			/* Connection established, data forwarding in progress. */
-			if (!conn->request.dlen && !conn->response.dlen) {
-				ev_cli.events = EPOLLIN;
-				ev_svr.events = EPOLLIN;
-			} else if (conn->request.dlen && !conn->response.dlen) {
-				ev_svr.events = EPOLLIN | EPOLLOUT;
-			} else if (!conn->request.dlen && conn->response.dlen) {
-				ev_cli.events = EPOLLIN | EPOLLOUT;
-			} else {
-				ev_cli.events = EPOLLOUT;
-				ev_svr.events = EPOLLOUT;
-			}
-			break;
-		case S_SERVER_CONNECTING:
-			/* Wait for the server connection to establish. */
-			ev_svr.events = EPOLLOUT;
-			break;
-	}
-	
-	if (ev_cli.events) {
-		ev_cli.data.ptr = &conn->ev_client;
-		if (conn->client_in_ep)
-			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev_cli); /* FIXME: result */
-		else
-			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev_cli);
-		conn->client_in_ep = true;
-	} else {
-		if (conn->client_in_ep)
-			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->cli_sock, NULL);
-		conn->client_in_ep = false;
-	}
-	
-	if (ev_svr.events) {
-		ev_svr.data.ptr = &conn->ev_server;
-		if (conn->server_in_ep)
-			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev_svr);
-		else
-			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev_svr);
-		conn->server_in_ep = true;
-	} else {
-		if (conn->server_in_ep)
-			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
-		conn->server_in_ep = false;
-	}
-}
-
-static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
-{
-	int cli_sock, svr_sock;
-	struct sockaddr_storage cli_addr;
-	socklen_t cli_alen = sizeof(cli_addr);
 	struct proxy_conn *conn;
+	int svr_sock;
 	char s1[44] = ""; int n1 = 0;
 
-	cli_sock = accept(lsn_sock, (struct sockaddr *)&cli_addr, &cli_alen);
-	if (cli_sock < 0) {
-		/* FIXME: error indicated, need to exit? */
-		fprintf(stderr, "*** accept() failed: %s\n", strerror(errno));
-		return NULL;
-	}
-	
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
 		fprintf(stderr, "*** malloc(struct proxy_conn) error: %s\n",
 				strerror(errno));
-		close(cli_sock);
 		return NULL;
 	}
-	conn->cli_sock = cli_sock;
-	set_nonblock(conn->cli_sock);
-	conn->cli_addr = cli_addr;
+	conn->cli_addr = *cli_addr;
 	
 	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(g_dst_sockaddr.ss_family, SOCK_STREAM, 0)) < 0) {
+	if ((svr_sock = socket(g_dst_sockaddr.ss_family, SOCK_DGRAM, 0)) < 0) {
 		fprintf(stderr, "*** socket(svr_sock) error: %s\n", strerror(errno));
 		/**
 		 * 'conn' has only been used among this function,
@@ -330,16 +1105,11 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		g_dst_addrlen)) == 0) {
 		/* Connected, prepare for data forwarding. */
-		conn->state = S_SERVER_CONNECTED;
+		struct epoll_event ev;
+		ev.data.ptr = conn;
+		ev.events = EPOLLIN;
+		epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
 		*error = 0;
-		return conn;
-	} else if (errno == EINPROGRESS) {
-		/**
-		 * OK, the request does not fail right now, so wait
-		 *  for it completes.
-		 */
-		conn->state = S_SERVER_CONNECTING;
-		*error = EINPROGRESS;
 		return conn;
 	} else {
 		/* Error occurs, drop the session. */
@@ -349,94 +1119,17 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	}
 }
 
-static int server_connecting(struct proxy_conn *conn)
+static struct proxy_conn *get_conn_by_cli_addr(struct sockaddr_storage *cli_addr)
 {
-	/* The connection has established or failed. */
-	int err = 0;
-	socklen_t errlen = sizeof(err);
+	struct h_cache *he;
 	
-	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err,
-		&errlen) < 0) {
-		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
-		conn->state = S_CLOSING;
-		return ECONNABORTED;
-	}
-	if (err != 0) {
-		fprintf(stderr, "*** Connection failed: %s\n", strerror(err));
-		conn->state = S_CLOSING;
-		return ECONNABORTED;
-	}
-	/* Connected, preparing for data forwarding. */
-	conn->state = S_SERVER_CONNECTED;
-	return 0;
-}
-
-static int server_connected(struct proxy_conn *conn)
-{
-	/* Allocate both buffers. */
-	conn->request.size = REQ_BUFFER_SIZE;
-	conn->response.size = RSP_BUFFER_SIZE;
-	conn->request.buf = (char *)malloc(conn->request.size);
-	conn->response.buf = (char *)malloc(conn->response.size);
-	if (!conn->request.buf || !conn->response.buf) {
-		fprintf(stderr, "*** Failed to allocate either request "
-				"or response buffers.\n");
-		conn->state = S_CLOSING;
-		return ECONNABORTED;
-	}
+	if (!(he = h_entry_try_get(&g_conn_tbl, cli_addr, __proxy_conn_create_fn,
+		__proxy_conn_modify_fn)))
+		return NULL;
+	/* Single threaded, don't have to hold it. */
+	h_entry_put(he);
 	
-	if (0) {
-		/* FIXME: SOCKS request. */
-	} else {
-		/* Direct access. */
-		conn->state = S_FORWARDING;
-	}
-	return EWOULDBLOCK;
-}
-
-static int forward_data(struct proxy_conn *conn, int epfd,
-		struct epoll_event *ev)
-{
-	int *evptr = (int *)ev->data.ptr;
-	struct buffer_info *rxb, *txb;
-	int efd, rc;
-	
-	if (*evptr == EV_MAGIC_CLIENT) {
-		efd = conn->cli_sock;
-		rxb = &conn->request;
-		txb = &conn->response;
-	} else {
-		efd = conn->svr_sock;
-		rxb = &conn->response;
-		txb = &conn->request;
-	}
-	
-	if (ev->events & EPOLLIN) {
-		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
-			char s1[44] = ""; int n1 = 0;
-			get_sockaddr_pair(&conn->cli_addr, s1, &n1);
-			printf("-- Client [%s]:%d exits\n", s1, n1);
-			conn->state = S_CLOSING;
-			return ECONNABORTED;
-		}
-		rxb->dlen = (unsigned)rc;
-	}
-	
-	if (ev->events & EPOLLOUT) {
-		if ((rc = send(efd, txb->buf + txb->rpos,
-			txb->dlen - txb->rpos, 0)) <= 0) {
-			char s1[44] = ""; int n1 = 0;
-			get_sockaddr_pair(&conn->cli_addr, s1, &n1);
-			printf("-- Client [%s]:%d exits\n", s1, n1);
-			conn->state = S_CLOSING;
-			return ECONNABORTED;
-		}
-		txb->rpos += rc;
-		if (txb->rpos >= txb->dlen)
-			txb->rpos = txb->dlen = 0;
-	}
-	
-	return EWOULDBLOCK;
+	return container_of(he, struct proxy_conn, h_cache);
 }
 
 static int get_sockaddr_v4v6(const char *node, int port,
@@ -474,7 +1167,7 @@ static int get_sockaddr_v4v6(const char *node, int port,
 
 static void show_help(int argc, char *argv[])
 {
-	printf("Userspace TCP proxy.\n");
+	printf("User space UDP proxy.\n");
 	printf("Usage:\n");
 	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d]\n", argv[0]);
 	printf("Options:\n");
@@ -483,16 +1176,15 @@ static void show_help(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-	int lsn_sock;
 	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
-	int b_reuse = 1, opt;
 	bool is_daemon = false;
 	char s_src_host[50], s_dst_host[50];
 	int src_port, dst_port;
-	int epfd;
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
-	int ev_magic_listener = EV_MAGIC_LISTENER;
+	char buffer[1024 * 64];
+	time_t last_check, __last_check;
+	int opt, rc;
 
 	while ((opt = getopt(argc, argv, "dh")) != -1) {
 		switch (opt) {
@@ -539,41 +1231,35 @@ int main(int argc, char *argv[])
 	}
 
 	/* Resolve the addresses */
-	if (get_sockaddr_v4v6(s_src_host, src_port, SOCK_STREAM,
+	if (get_sockaddr_v4v6(s_src_host, src_port, SOCK_DGRAM,
 		&src_family, &g_src_sockaddr, &g_src_addrlen)) {
 		fprintf(stderr, "*** Invalid source address.\n");
 		exit(1);
 	}
-	if (get_sockaddr_v4v6(s_dst_host, dst_port, SOCK_STREAM,
+	if (get_sockaddr_v4v6(s_dst_host, dst_port, SOCK_DGRAM,
 		&dst_family, &g_dst_sockaddr, &g_dst_addrlen)) {
 		fprintf(stderr, "*** Invalid destination address.\n");
 		exit(1);
 	}
 	
-	lsn_sock = socket(g_src_sockaddr.ss_family, SOCK_STREAM, 0);
-	if (lsn_sock < 0) {
+	g_lsn_sock = socket(g_src_sockaddr.ss_family, SOCK_DGRAM, 0);
+	if (g_lsn_sock < 0) {
 		fprintf(stderr, "*** socket() failed: %s.", strerror(errno));
 		exit(1);
 	}
-	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_reuse, sizeof(b_reuse));
 
-	if (bind(lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
+	if (bind(g_lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
 		fprintf(stderr, "*** bind() failed: %s.\n", strerror(errno));
 		exit(1);
 	}
 
-	if (listen(lsn_sock, 100) < 0) {
-		fprintf(stderr, "*** listen() failed: %s.\n", strerror(errno));
-		exit(1);
-	}
-
-	set_nonblock(lsn_sock);
+	set_nonblock(g_lsn_sock);
 	
-	printf("TCP proxy %s:%d -> %s:%d started \n",
+	printf("UDP proxy %s:%d -> %s:%d started \n",
 		   s_src_host, src_port, s_dst_host, dst_port);
 
 	/* Create epoll table. */
-	if ((epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
+	if ((g_epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
 		fprintf(stderr, "*** epoll_create() failed: %s\n",
 				strerror(errno));
 		exit(1);
@@ -583,6 +1269,13 @@ int main(int argc, char *argv[])
 	if (is_daemon)
 		do_daemonize();
 
+	/* Create session hash table. */
+	rc = h_table_create(&g_conn_tbl, NULL, 512, 2048, 10, &proxy_conn_hops);
+	if (rc < 0) {
+		fprintf(stderr, "*** h_table_create() failed.\n");
+		exit(1);
+	}
+
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
 	 *  a half-closed socket which causes process to abort.
@@ -590,16 +1283,16 @@ int main(int argc, char *argv[])
 	signal(SIGPIPE, SIG_IGN);
 
 	/* epoll loop */
-	ev.data.ptr = &ev_magic_listener;
+	ev.data.ptr = &g_lsn_sock;
 	ev.events = EPOLLIN;
-	epoll_ctl(epfd, EPOLL_CTL_ADD, lsn_sock, &ev);
+	epoll_ctl(g_epfd, EPOLL_CTL_ADD, g_lsn_sock, &ev);
 
-	for (;;) {
+	last_check = time(NULL);
+
+	while (true) {
 		int nfds, i;
 		
-		nfds = epoll_wait(epfd, events, events_sz, 1000 * 2);
-		if (nfds == 0)
-			continue;
+		nfds = epoll_wait(g_epfd, events, events_sz, 1000 * 1);
 		if (nfds < 0) {
 			fprintf(stderr, "*** epoll_wait() error: %s\n", strerror(errno));
 			exit(1);
@@ -609,48 +1302,44 @@ int main(int argc, char *argv[])
 			struct epoll_event *evp = &events[i];
 			int *evptr = (int *)evp->data.ptr;
 			struct proxy_conn *conn;
-			int rc = 0;
+			int rlen;
 			
 			/* NULL evp->data.ptr indicates this socket is closed. */
 			if (evptr == NULL)
 				continue;
 			
-			if (*evptr == EV_MAGIC_LISTENER) {
-				/* A new connection calls in. */
-				rc = -1;
-				if (!(conn = accept_and_connect(lsn_sock, &rc)))
+			if (evptr == &g_lsn_sock) {
+				/* Data from client. */
+				struct sockaddr_storage cli_addr;
+				socklen_t cli_alen = sizeof(cli_addr);
+				if ((rlen = recvfrom(g_lsn_sock, buffer, sizeof(buffer),
+					0, (struct sockaddr *)&cli_addr, &cli_alen)) <= 0)
 					continue;
+				if (!(conn = get_conn_by_cli_addr(&cli_addr)))
+					continue;
+				send(conn->svr_sock, buffer, (size_t)rlen, 0);
+				/* FIXME: Need to care about 'rc'? */
 			} else {
+				/* Data from server. */
 				conn = get_conn_by_evptr(evptr);
-			}
-			
-			/**
-			 * 1. rc == 0 means I/O completes, can be treated in current epoll cycle;
-			 *    rc != 0 means I/O inprogress, cannot be treated in this cycle.
-			 * 2. If conn->state == S_CLOSING, close it.
-			 */
-			while (rc == 0 && conn->state != S_CLOSING) {
-				switch (conn->state) {
-				case S_FORWARDING:
-					rc = forward_data(conn, epfd, evp);
-					break;
-				case S_SERVER_CONNECTING:
-					rc = server_connecting(conn);
-					break;
-				case S_SERVER_CONNECTED:
-					rc = server_connected(conn);
-					break;
-				default:
-					fprintf(stderr, "*** Undefined state: %d\n", conn->state);
-					conn->state = S_CLOSING;
-					rc = ECONNABORTED;
+				if ((rlen = recv(conn->svr_sock, buffer, sizeof(buffer), 0))
+					<= 0) {
+					/* Close the session. */
+					release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
+					continue;
 				}
+				sendto(g_lsn_sock, buffer, rlen, 0, 
+						(struct sockaddr *)&conn->cli_addr,
+						sizeof(conn->cli_addr));
+				/* FIXME: Need to care 'rc'? */
 			}
-			if (conn->state == S_CLOSING) {
-				release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
-			} else {
-				set_conn_epoll_fds(conn, epfd);
-			}
+		}
+		
+		/* Timeout check and recycle */
+		__last_check = time(NULL);
+		if (__last_check >= last_check + 1) {
+			__h_table_timeo_check(&g_conn_tbl);
+			last_check = __last_check;
 		}
 	}
 

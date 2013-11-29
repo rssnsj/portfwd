@@ -1,8 +1,13 @@
 CC = $(CROSS_COMPILE)gcc
 CFLAGS = -g
 
+all: tcpfwd udpfwd
+
 tcpfwd: tcpfwd.o
 	$(CC) -o $@ $^ $(LDFLAGS) -levent
+
+udpfwd: udpfwd.o
+	$(CC) -o $@ $^ $(LDFLAGS) -levent -lpthread
 
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
