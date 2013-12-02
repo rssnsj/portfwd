@@ -778,24 +778,25 @@ static void show_help(int argc, char *argv[])
 {
 	printf("User space UDP proxy.\n");
 	printf("Usage:\n");
-	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d]\n", argv[0]);
+	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d|-o]\n", argv[0]);
 	printf("Options:\n");
-	printf("  -d                run in background\n");
+	printf("  -d              run in background\n");
+	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
 }
 
 int main(int argc, char *argv[])
 {
 	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
-	bool is_daemon = false;
+	bool is_daemon = false, is_v6only = false;
 	char s_src_host[50], s_dst_host[50];
 	int src_port, dst_port;
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
 	char buffer[1024 * 64];
 	time_t last_check, __last_check;
-	int opt, rc;
+	int b_sockopt = 1, opt, rc;
 
-	while ((opt = getopt(argc, argv, "dh")) != -1) {
+	while ((opt = getopt(argc, argv, "dho")) != -1) {
 		switch (opt) {
 		case 'd':
 			is_daemon = true;
@@ -803,6 +804,9 @@ int main(int argc, char *argv[])
 		case 'h':
 			show_help(argc, argv);
 			exit(0);
+			break;
+		case 'o':
+			is_v6only = true;
 			break;
 		case '?':
 			exit(1);
@@ -855,6 +859,11 @@ int main(int argc, char *argv[])
 	if (g_lsn_sock < 0) {
 		fprintf(stderr, "*** socket() failed: %s.", strerror(errno));
 		exit(1);
+	}
+
+	if (g_src_sockaddr.ss_family == AF_INET6 && is_v6only) {
+		b_sockopt = 1;
+		setsockopt(g_lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_sockopt, sizeof(b_sockopt));
 	}
 
 	if (bind(g_lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
