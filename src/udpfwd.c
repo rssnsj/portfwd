@@ -778,25 +778,26 @@ static void show_help(int argc, char *argv[])
 {
 	printf("User space UDP proxy.\n");
 	printf("Usage:\n");
-	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d|-o]\n", argv[0]);
+	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o] [-f6.4]\n", argv[0]);
 	printf("Options:\n");
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
+	printf("  -f X.Y          allow address families for source|destination\n");
 }
 
 int main(int argc, char *argv[])
 {
 	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
 	bool is_daemon = false, is_v6only = false;
-	char s_src_host[50], s_dst_host[50];
+	char s_src_host[50], s_dst_host[50], s_af1[10], s_af2[10];
 	int src_port, dst_port;
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
 	char buffer[1024 * 64];
 	time_t last_check, __last_check;
-	int b_sockopt = 1, opt, rc;
+	int b_sockopt = 1, opt, rc, af1 = 0, af2 = 0;
 
-	while ((opt = getopt(argc, argv, "dho")) != -1) {
+	while ((opt = getopt(argc, argv, "dhof:")) != -1) {
 		switch (opt) {
 		case 'd':
 			is_daemon = true;
@@ -807,6 +808,26 @@ int main(int argc, char *argv[])
 			break;
 		case 'o':
 			is_v6only = true;
+			break;
+		case 'f':
+			rc = sscanf(optarg, "%5[^.].%5s", s_af1, s_af2);
+			if (rc == 2) {
+				sscanf(s_af1, "%d", &af1);
+				sscanf(s_af2, "%d", &af2);
+			} else {
+				fprintf(stderr, "*** Invalid address families: %s\n", optarg);
+				exit(1);
+			}
+			if (af1 == 4) {
+				src_family = AF_INET;
+			} else if (af1 == 6) {
+				src_family = AF_INET6;
+			}
+			if (af2 == 4) {
+				dst_family = AF_INET;
+			} else if (af2 == 6) {
+				dst_family = AF_INET6;
+			}
 			break;
 		case '?':
 			exit(1);
