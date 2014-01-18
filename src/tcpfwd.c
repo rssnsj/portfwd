@@ -56,7 +56,7 @@ static int do_daemonize(void)
 	int rc;
 	
 	if ((rc = fork()) < 0) {
-		fprintf(stderr, "*** fork() error: %s.", strerror(errno));
+		fprintf(stderr, "*** fork() error: %s.\n", strerror(errno));
 		return rc;
 	} else if (rc > 0) {
 		/* In parent process */
@@ -577,7 +577,7 @@ int main(int argc, char *argv[])
 	
 	lsn_sock = socket(g_src_sockaddr.ss_family, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
-		fprintf(stderr, "*** socket() failed: %s.", strerror(errno));
+		fprintf(stderr, "*** socket() failed: %s.\n", strerror(errno));
 		exit(1);
 	}
 
