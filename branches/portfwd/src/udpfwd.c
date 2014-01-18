@@ -382,7 +382,7 @@ static void __h_table_timeo_check(struct h_table *ht)
 		h_table_len_dec(ht);
 	} /* while(!list_empty(&ht->idle_queue)) */
 	
-	printf("-- Live entries: %d\n", ht->len);
+	printf("-- Live entries: %d\n", (int)ht->len);
 }
 
 /*
