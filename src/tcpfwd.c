@@ -84,6 +84,17 @@ static int set_nonblock(int sfd)
 	return 0;
 }
 
+static void write_pidfile(const char *filepath)
+{
+	FILE *fp;
+	if (!(fp = fopen(filepath, "w"))) {
+		fprintf(stderr, "*** fopen() failed: %s\n", strerror(errno));
+		exit(1);
+	}
+	fprintf(fp, "%d\n", (int)getpid());
+	fclose(fp);
+}
+
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 #define EPOLL_TABLE_SIZE 2048
@@ -481,6 +492,7 @@ static void show_help(int argc, char *argv[])
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
 	printf("  -f X.Y          allow address families for source|destination\n");
+	printf("  -p <pidfile>    write PID to file\n");
 }
 
 int main(int argc, char *argv[])
@@ -489,6 +501,7 @@ int main(int argc, char *argv[])
 	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
 	int b_sockopt = 1, opt;
 	bool is_daemon = false, is_v6only = false;
+	const char *pidfile = NULL;
 	char s_src_host[50], s_dst_host[50], s_af1[10], s_af2[10];
 	int src_port, dst_port;
 	int rc, epfd, af1 = 0, af2 = 0;
@@ -496,7 +509,7 @@ int main(int argc, char *argv[])
 	size_t events_sz = MAX_POLL_EVENTS;
 	int ev_magic_listener = EV_MAGIC_LISTENER;
 
-	while ((opt = getopt(argc, argv, "dhof:")) != -1) {
+	while ((opt = getopt(argc, argv, "dhof:p:")) != -1) {
 		switch (opt) {
 		case 'd':
 			is_daemon = true;
@@ -508,6 +521,10 @@ int main(int argc, char *argv[])
 		case 'o':
 			is_v6only = true;
 			break;
+		case 'p':
+			pidfile = optarg;
+			break;
+			;;
 		case 'f':
 			rc = sscanf(optarg, "%5[^.].%5s", s_af1, s_af2);
 			if (rc == 2) {
@@ -614,6 +631,9 @@ int main(int argc, char *argv[])
 	/* Run in background. */
 	if (is_daemon)
 		do_daemonize();
+
+	if (pidfile)
+		write_pidfile(pidfile);
 
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
