@@ -488,7 +488,7 @@ static int server_send_buffer(struct proxy_conn *conn)
 					__FUNCTION__);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
-		} else if (errno == EWOULDBLOCK && errno == EAGAIN) {
+		} else if (errno == EWOULDBLOCK || errno == EAGAIN) {
 			/* I/O not ready, handle in next event. */
 			return errno;
 		} else {
@@ -523,7 +523,7 @@ static int server_recv_buffer(struct proxy_conn *conn)
 					__FUNCTION__);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
-		} else if (errno == EWOULDBLOCK && errno == EAGAIN) {
+		} else if (errno == EWOULDBLOCK || errno == EAGAIN) {
 			/* I/O not ready, handle in next event. */
 			return errno;
 		} else {
