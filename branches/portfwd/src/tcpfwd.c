@@ -30,7 +30,7 @@ static struct sockaddr_storage g_dst_sockaddr;
 static socklen_t g_src_addrlen;
 static socklen_t g_dst_addrlen;
 
-static char *get_sockaddr_pair(const void *addr,
+static char *sockaddr_to_print(const void *addr,
 		char *host, int *port)
 {
 	const union __sa_union {
@@ -335,7 +335,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	/* Connect to real server. */
 	conn->svr_addr = g_dst_sockaddr;
 
-	get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+	sockaddr_to_print(&conn->cli_addr, s1, &n1);
 	printf("-- Client [%s]:%d entered\n", s1, n1);
 	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
@@ -425,7 +425,7 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 	if (ev->events & EPOLLIN) {
 		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
 			char s1[44] = ""; int n1 = 0;
-			get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+			sockaddr_to_print(&conn->cli_addr, s1, &n1);
 			printf("-- Client [%s]:%d exits\n", s1, n1);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
@@ -437,7 +437,7 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 		if ((rc = send(efd, txb->buf + txb->rpos,
 			txb->dlen - txb->rpos, 0)) <= 0) {
 			char s1[44] = ""; int n1 = 0;
-			get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+			sockaddr_to_print(&conn->cli_addr, s1, &n1);
 			printf("-- Client [%s]:%d exits\n", s1, n1);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;

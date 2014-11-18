@@ -459,7 +459,7 @@ static inline int h_table_create(struct h_table *ht,
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
-static char *get_sockaddr_pair(const void *addr,
+static char *sockaddr_to_print(const void *addr,
 		char *host, int *port)
 {
 	const union __sa_union {
@@ -720,7 +720,7 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 	/* Connect to real server. */
 	conn->svr_addr = g_dst_sockaddr;
 
-	get_sockaddr_pair(&conn->cli_addr, s1, &n1);
+	sockaddr_to_print(&conn->cli_addr, s1, &n1);
 	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		g_dst_addrlen)) == 0) {
