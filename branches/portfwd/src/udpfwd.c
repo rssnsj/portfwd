@@ -825,7 +825,6 @@ int main(int argc, char *argv[])
 		case 'p':
 			pidfile = optarg;
 			break;
-			;;
 		case 'f':
 			rc = sscanf(optarg, "%5[^.].%5s", s_af1, s_af2);
 			if (rc == 2) {
