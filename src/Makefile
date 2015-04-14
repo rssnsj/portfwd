@@ -1,5 +1,6 @@
-CC = $(CROSS_COMPILE)gcc
-CFLAGS = -g
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS += -g
+PREFIX ?= /usr/local
 
 all: tcpfwd udpfwd
 
@@ -12,9 +13,9 @@ udpfwd: udpfwd.o
 %.o: %.c
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
-install: tcpfwd
-	mkdir -p /usr/local/bin
-	cp -vf tcpfwd udpfwd /usr/local/bin/
+install: all
+	mkdir -p $(PREFIX)/bin
+	cp -vf tcpfwd udpfwd $(PREFIX)/bin/
 
 clean:
 	rm -f tcpfwd udpfwd *.o
