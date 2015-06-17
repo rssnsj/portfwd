@@ -947,11 +947,15 @@ int main(int argc, char *argv[])
 
 	last_check = time(NULL);
 
-	while (true) {
+	for (;;) {
 		int nfds, i;
 		
 		nfds = epoll_wait(g_epfd, events, events_sz, 1000 * 1);
+		if (nfds == 0)
+			continue;
 		if (nfds < 0) {
+			if (errno == EINTR || errno == ERESTART)
+				continue;
 			fprintf(stderr, "*** epoll_wait() error: %s\n", strerror(errno));
 			exit(1);
 		}

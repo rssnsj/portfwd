@@ -652,6 +652,8 @@ int main(int argc, char *argv[])
 		if (nfds == 0)
 			continue;
 		if (nfds < 0) {
+			if (errno == EINTR || errno == ERESTART)
+				continue;
 			fprintf(stderr, "*** epoll_wait() error: %s\n", strerror(errno));
 			exit(1);
 		}
