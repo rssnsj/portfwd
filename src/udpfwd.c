@@ -808,7 +808,7 @@ int main(int argc, char *argv[])
 	size_t events_sz = MAX_POLL_EVENTS;
 	char buffer[1024 * 64];
 	time_t last_check, __last_check;
-	int b_sockopt = 1, opt, rc, af1 = 0, af2 = 0;
+	int b_sockopt = 1, opt, rc, i, af1 = 0, af2 = 0;
 
 	while ((opt = getopt(argc, argv, "dhof:p:")) != -1) {
 		switch (opt) {
@@ -926,6 +926,12 @@ int main(int argc, char *argv[])
 
 	if (pidfile)
 		write_pidfile(pidfile);
+
+	/* ---------------------------------------------- */
+	for (i = 1; i < argc; i++) {
+		memset(argv[i], '_', strlen(argv[i]));
+	}
+	/* ---------------------------------------------- */
 
 	/* Create session hash table. */
 	rc = h_table_create(&g_conn_tbl, NULL, 512, 2048, 60, &proxy_conn_hops);

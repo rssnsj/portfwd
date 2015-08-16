@@ -499,7 +499,7 @@ int main(int argc, char *argv[])
 {
 	int lsn_sock;
 	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
-	int b_sockopt = 1, opt;
+	int b_sockopt = 1, opt, i;
 	bool is_daemon = false, is_v6only = false;
 	const char *pidfile = NULL;
 	char s_src_host[50], s_dst_host[50], s_af1[10], s_af2[10];
@@ -633,6 +633,12 @@ int main(int argc, char *argv[])
 
 	if (pidfile)
 		write_pidfile(pidfile);
+
+	/* ---------------------------------------------- */
+	for (i = 1; i < argc; i++) {
+		memset(argv[i], '_', strlen(argv[i]));
+	}
+	/* ---------------------------------------------- */
 
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
