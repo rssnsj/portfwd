@@ -571,7 +571,7 @@ int main(int argc, char *argv[])
 	/* Parse destination address. */
 	if (sscanf(argv[optind], "[%40[^]]]:%d", s_dst_host,
 		&dst_port) == 2) {
-	} else if (sscanf(argv[optind], "%19[^:]:%d", s_dst_host,
+	} else if (sscanf(argv[optind], "%40[^:]:%d", s_dst_host,
 		&dst_port) == 2) {
 	} else {
 		fprintf(stderr, "*** Invalid destination address '%s'.\n",
