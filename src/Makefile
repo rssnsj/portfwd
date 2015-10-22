@@ -1,16 +1,17 @@
 CC ?= $(CROSS_COMPILE)gcc
 CFLAGS += -g
 PREFIX ?= /usr/local
+HEADERS := ps_epoll.h
 
 all: tcpfwd udpfwd
 
 tcpfwd: tcpfwd.o
-	$(CC) -o $@ $^ $(LDFLAGS) -levent
+	$(CC) -o $@ $^ $(LDFLAGS)
 
 udpfwd: udpfwd.o
-	$(CC) -o $@ $^ $(LDFLAGS) -levent
+	$(CC) -o $@ $^ $(LDFLAGS)
 
-%.o: %.c
+%.o: %.c $(HEADERS)
 	$(CC) -c -Wall $(CFLAGS) -o $@ $<
 
 install: all
