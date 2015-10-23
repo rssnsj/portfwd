@@ -75,7 +75,7 @@ static int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 			FD_SET(fd, &eh->rset);
 		if ((event->events & EPOLLOUT))
 			FD_SET(fd, &eh->wset);
-		if (event->events && fd > 0)
+		if (event->events && fd > eh->max_fd)
 			eh->max_fd = fd;
 		eh->events[fd] = *event;
 		break;
