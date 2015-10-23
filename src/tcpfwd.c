@@ -268,10 +268,11 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	
 	if (ev_cli.events) {
 		ev_cli.data.ptr = &conn->ev_client;
-		if (conn->client_in_ep)
+		if (conn->client_in_ep) {
 			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev_cli); /* FIXME: result */
-		else
+		} else {
 			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev_cli);
+		}
 		conn->client_in_ep = true;
 	} else {
 		if (conn->client_in_ep)
@@ -281,10 +282,11 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	
 	if (ev_svr.events) {
 		ev_svr.data.ptr = &conn->ev_server;
-		if (conn->server_in_ep)
+		if (conn->server_in_ep) {
 			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev_svr);
-		else
+		} else {
 			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev_svr);
+		}
 		conn->server_in_ep = true;
 	} else {
 		if (conn->server_in_ep)
