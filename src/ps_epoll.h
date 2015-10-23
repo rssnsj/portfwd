@@ -113,10 +113,14 @@ static int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int t
 	rset = eh->rset;
 	wset = eh->wset;
 
-	timeo.tv_sec = timeout / 1000;
-	timeo.tv_usec = (timeout % 1000) * 1000;
+	if (timeout >= 0) {
+		timeo.tv_sec = timeout / 1000;
+		timeo.tv_usec = (timeout % 1000) * 1000;
+		nfds = select(eh->max_fd + 1, &rset, &wset, NULL, &timeo);
+	} else {
+		nfds = select(eh->max_fd + 1, &rset, &wset, NULL, NULL);
+	}
 
-	nfds = select(eh->max_fd + 1, &rset, &wset, NULL, &timeo);
 	if (nfds <= 0)
 		return nfds;
 
