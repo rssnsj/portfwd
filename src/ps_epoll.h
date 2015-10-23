@@ -7,6 +7,10 @@
 #include <sys/select.h>
 #include <time.h>
 
+#ifdef __APPLE__
+	#define ERESTART 700
+#endif
+
 /* NOTICE: To make sure being included once in a single program. */
 int build_error_on_linking = 0;
 
