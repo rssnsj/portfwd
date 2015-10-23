@@ -571,7 +571,7 @@ static unsigned int proxy_conn_hash_fn(void *key)
 	} else if (sa->ss.ss_family == AF_INET6) {
 		int i;
 		for (i = 0; i < 4; i++)
-			hash += sa->sa6.sin6_addr.s6_addr32[i];
+			hash += ((uint32_t *)&sa->sa6.sin6_addr)[i];
 		hash += ntohs(sa->sa6.sin6_port);
 	}
 	
