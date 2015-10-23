@@ -86,8 +86,10 @@ static int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 	case EPOLL_CTL_DEL:
 		FD_CLR(fd, &eh->rset);
 		FD_CLR(fd, &eh->wset);
-		if (eh->max_fd == fd)
-			eh->max_fd--;
+		if (eh->max_fd == fd) {
+			while (!FD_ISSET(eh->max_fd, &eh->rset) && ! FD_ISSET(eh->max_fd, &eh->wset))
+				eh->max_fd--;
+		}
 		break;
 	default:
 		fprintf(stderr, "*** Unsupported operation: %d\n", op);
@@ -109,8 +111,10 @@ static int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int t
 		if (fcntl(fd, F_GETFL) < 0 && errno == EBADF) {
 			FD_CLR(fd, &eh->rset);
 			FD_CLR(fd, &eh->wset);
-			if (eh->max_fd == fd)
-				eh->max_fd--;
+			if (eh->max_fd == fd) {
+				while (!FD_ISSET(eh->max_fd, &eh->rset) && ! FD_ISSET(eh->max_fd, &eh->wset))
+					eh->max_fd--;
+			}
 		}
 	}
 
