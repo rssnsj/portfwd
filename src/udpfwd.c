@@ -949,7 +949,14 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		int nfds, i;
-		
+
+		/* Timeout check and recycle */
+		__last_check = time(NULL);
+		if (__last_check >= last_check + 2) {
+			__h_table_timeo_check(&g_conn_tbl);
+			last_check = __last_check;
+		}
+
 		nfds = epoll_wait(g_epfd, events, events_sz, 1000 * 1);
 		if (nfds == 0)
 			continue;
@@ -995,13 +1002,6 @@ int main(int argc, char *argv[])
 						sizeof(conn->cli_addr));
 				/* FIXME: Need to care 'rc'? */
 			}
-		}
-		
-		/* Timeout check and recycle */
-		__last_check = time(NULL);
-		if (__last_check >= last_check + 1) {
-			__h_table_timeo_check(&g_conn_tbl);
-			last_check = __last_check;
 		}
 	}
 
