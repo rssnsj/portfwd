@@ -547,6 +547,7 @@ struct proxy_conn {
 	int svr_sock;
 	/* Memorize the session addresses. */
 	struct sockaddr_storage cli_addr;
+	socklen_t cli_alen;
 	struct sockaddr_storage svr_addr;
 };
 
@@ -764,8 +765,8 @@ static int get_sockaddr_v4v6(const char *node, int port,
 	memset(&hints, 0, sizeof(struct addrinfo));
 	hints.ai_family = *family;    /* Allow IPv4 or IPv6 */
 	hints.ai_socktype = socktype;
-	hints.ai_flags = AI_PASSIVE;    /* For wildcard IP address */
-	hints.ai_protocol = 0;          /* Any protocol */
+	hints.ai_flags = AI_PASSIVE;  /* For wildcard IP address */
+	hints.ai_protocol = 0;        /* Any protocol */
 	hints.ai_canonname = NULL;
 	hints.ai_addr = NULL;
 	hints.ai_next = NULL;
@@ -980,12 +981,13 @@ int main(int argc, char *argv[])
 			if (evptr == &g_lsn_sock) {
 				/* Data from client. */
 				struct sockaddr_storage cli_addr;
-				socklen_t cli_alen = sizeof(cli_addr);
+				socklen_t __cli_alen = sizeof(cli_addr);
 				if ((rlen = recvfrom(g_lsn_sock, buffer, sizeof(buffer),
-					0, (struct sockaddr *)&cli_addr, &cli_alen)) <= 0)
+					0, (struct sockaddr *)&cli_addr, &__cli_alen)) <= 0)
 					continue;
 				if (!(conn = get_conn_by_cli_addr(&cli_addr)))
 					continue;
+				conn->cli_alen = __cli_alen;
 				send(conn->svr_sock, buffer, (size_t)rlen, 0);
 				/* FIXME: Need to care 'rc'? */
 			} else {
@@ -997,9 +999,8 @@ int main(int argc, char *argv[])
 					release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
 					continue;
 				}
-				sendto(g_lsn_sock, buffer, rlen, 0, 
-						(struct sockaddr *)&conn->cli_addr,
-						sizeof(conn->cli_addr));
+				sendto(g_lsn_sock, buffer, rlen, 0, (struct sockaddr *)&conn->cli_addr,
+						conn->cli_alen);
 				/* FIXME: Need to care 'rc'? */
 			}
 		}
