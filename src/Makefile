@@ -1,7 +1,12 @@
 CC ?= $(CROSS_COMPILE)gcc
-CFLAGS += -g
 PREFIX ?= /usr/local
-HEADERS := ps_epoll.h
+CFLAGS += -g
+
+ifeq ($(shell uname), Linux)
+LDFLAGS += -levent
+else
+HEADERS += ps_epoll.h
+endif
 
 all: tcpfwd udpfwd
 

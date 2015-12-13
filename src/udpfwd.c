@@ -7,7 +7,11 @@
 #include <signal.h>
 #include <stddef.h>
 #include <assert.h>
-#include "ps_epoll.h"
+#ifdef __linux__
+	#include <sys/epoll.h>
+#else
+	#include "ps_epoll.h"
+#endif
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
