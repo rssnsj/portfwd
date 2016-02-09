@@ -10,6 +10,7 @@
 #ifdef __linux__
 	#include <sys/epoll.h>
 #else
+	#define ERESTART 700
 	#include "ps_epoll.h"
 #endif
 #include <sys/types.h>
