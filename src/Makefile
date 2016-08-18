@@ -3,7 +3,7 @@ PREFIX ?= /usr/local
 CFLAGS += -g
 
 ifeq ($(shell uname), Linux)
-LDFLAGS += -levent
+#LDFLAGS += -levent
 else
 HEADERS += ps_epoll.h
 endif
