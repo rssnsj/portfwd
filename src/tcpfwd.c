@@ -20,6 +20,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#ifdef __linux__
+	#include <linux/netfilter_ipv4.h>
+#endif
 
 typedef int bool;
 #define true  1
@@ -34,6 +37,7 @@ static struct sockaddr_storage g_src_sockaddr;
 static struct sockaddr_storage g_dst_sockaddr;
 static socklen_t g_src_addrlen;
 static socklen_t g_dst_addrlen;
+static bool g_base_addr_mode = false;
 
 static char *sockaddr_to_print(const void *addr,
 		char *host, int *port)
@@ -267,6 +271,7 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 			break;
 		case S_SERVER_CONNECTING:
 			/* Wait for the server connection to establish. */
+			ev_cli.events = EPOLLIN;  /* for detecting client close */
 			ev_svr.events = EPOLLOUT;
 			break;
 	}
@@ -306,7 +311,8 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	struct sockaddr_storage cli_addr;
 	socklen_t cli_alen = sizeof(cli_addr);
 	struct proxy_conn *conn;
-	char s1[44] = ""; int n1 = 0;
+	char s1[44] = "", s2[44] = "";
+	int n1 = 0, n2 = 0;
 
 	cli_sock = accept(lsn_sock, (struct sockaddr *)&cli_addr, &cli_alen);
 	if (cli_sock < 0) {
@@ -314,7 +320,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 		fprintf(stderr, "*** accept() failed: %s\n", strerror(errno));
 		return NULL;
 	}
-	
+
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
 		fprintf(stderr, "*** malloc(struct proxy_conn) error: %s\n",
@@ -325,7 +331,44 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	conn->cli_sock = cli_sock;
 	set_nonblock(conn->cli_sock);
 	conn->cli_addr = cli_addr;
-	
+
+	conn->svr_addr = g_dst_sockaddr;
+
+	/* Calculate address of the real server */
+#ifdef __linux__
+	if (g_base_addr_mode) {
+		if (conn->svr_addr.ss_family == AF_INET) {
+			struct sockaddr_in *svr_addr = (struct sockaddr_in *)&conn->svr_addr;
+			struct sockaddr_in loc_addr, orig_dst;
+			socklen_t loc_alen = sizeof(loc_addr), orig_alen = sizeof(orig_dst);
+			int port_offset = 0;
+
+			memset(&loc_addr, 0x0, sizeof(loc_addr));
+			memset(&orig_dst, 0x0, sizeof(orig_dst));
+
+			if (getsockname(conn->cli_sock, (struct sockaddr *)&loc_addr, &loc_alen)) {
+				fprintf(stderr, "*** getsockname(): %s.\n", strerror(errno));
+				release_proxy_conn(conn, NULL, 0);
+				return NULL;
+			}
+			if (getsockopt(conn->cli_sock, SOL_IP, SO_ORIGINAL_DST, &orig_dst, &orig_alen)) {
+				fprintf(stderr, "*** getsockopt(SO_ORIGINAL_DST): %s.\n", strerror(errno));
+				release_proxy_conn(conn, NULL, 0);
+				return NULL;
+			}
+
+			port_offset = (int)(ntohs(orig_dst.sin_port) - ntohs(loc_addr.sin_port));
+			svr_addr->sin_addr.s_addr = htonl(ntohl(svr_addr->sin_addr.s_addr) + port_offset);
+		} else {
+			fprintf(stderr, "*** No IPv6 support for base address/port mapping mode.\n");
+		}
+	}
+#endif
+
+	sockaddr_to_print(&conn->cli_addr, s1, &n1);
+	sockaddr_to_print(&conn->svr_addr, s2, &n2);
+	printf("Proxying [%s]:%d to [%s]:%d\n", s1, n1, s2, n2);
+
 	/* Initiate the connection to server right now. */
 	if ((svr_sock = socket(g_dst_sockaddr.ss_family, SOCK_STREAM, 0)) < 0) {
 		fprintf(stderr, "*** socket(svr_sock) error: %s\n", strerror(errno));
@@ -338,13 +381,7 @@ static struct proxy_conn *accept_and_connect(int lsn_sock, int *error)
 	}
 	conn->svr_sock = svr_sock;
 	set_nonblock(conn->svr_sock);
-	
-	/* Connect to real server. */
-	conn->svr_addr = g_dst_sockaddr;
 
-	sockaddr_to_print(&conn->cli_addr, s1, &n1);
-	printf("-- Client [%s]:%d entered\n", s1, n1);
-	
 	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
 		g_dst_addrlen)) == 0) {
 		/* Connected, prepare for data forwarding. */
@@ -373,8 +410,7 @@ static int server_connecting(struct proxy_conn *conn)
 	int err = 0;
 	socklen_t errlen = sizeof(err);
 	
-	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err,
-		&errlen) < 0) {
+	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
 		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
 		conn->state = S_CLOSING;
 		return ECONNABORTED;
@@ -397,8 +433,7 @@ static int server_connected(struct proxy_conn *conn)
 	conn->request.buf = (char *)malloc(conn->request.size);
 	conn->response.buf = (char *)malloc(conn->response.size);
 	if (!conn->request.buf || !conn->response.buf) {
-		fprintf(stderr, "*** Failed to allocate either request "
-				"or response buffers.\n");
+		fprintf(stderr, "*** Failed to allocate either request or response buffers.\n");
 		conn->state = S_CLOSING;
 		return ECONNABORTED;
 	}
@@ -433,7 +468,7 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
 			char s1[44] = ""; int n1 = 0;
 			sockaddr_to_print(&conn->cli_addr, s1, &n1);
-			printf("-- Client [%s]:%d exits\n", s1, n1);
+			printf("Client [%s]:%d exits\n", s1, n1);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
 		}
@@ -445,7 +480,7 @@ static int forward_data(struct proxy_conn *conn, int epfd,
 			txb->dlen - txb->rpos, 0)) <= 0) {
 			char s1[44] = ""; int n1 = 0;
 			sockaddr_to_print(&conn->cli_addr, s1, &n1);
-			printf("-- Client [%s]:%d exits\n", s1, n1);
+			printf("Client [%s]:%d exits\n", s1, n1);
 			conn->state = S_CLOSING;
 			return ECONNABORTED;
 		}
@@ -494,10 +529,11 @@ static void show_help(int argc, char *argv[])
 {
 	printf("Userspace TCP proxy.\n");
 	printf("Usage:\n");
-	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o] [-f6.4]\n", argv[0]);
+	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o] [-f6.4] [-b]\n", argv[0]);
 	printf("Options:\n");
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
+	printf("  -b              base address to port mapping mode\n");
 	printf("  -f X.Y          allow address families for source|destination\n");
 	printf("  -p <pidfile>    write PID to file\n");
 }
@@ -516,7 +552,7 @@ int main(int argc, char *argv[])
 	size_t events_sz = MAX_POLL_EVENTS;
 	int ev_magic_listener = EV_MAGIC_LISTENER;
 
-	while ((opt = getopt(argc, argv, "dhof:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "dhobf:p:")) != -1) {
 		switch (opt) {
 		case 'd':
 			is_daemon = true;
@@ -527,6 +563,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'o':
 			is_v6only = true;
+			break;
+		case 'b':
+			g_base_addr_mode = true;
 			break;
 		case 'p':
 			pidfile = optarg;
