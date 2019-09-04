@@ -143,10 +143,6 @@ struct proxy_conn {
 	struct sockaddr_inx cli_addr;
 	struct sockaddr_inx svr_addr;
 
-	/* To know if the fds are already added to epoll */
-	bool client_in_ep;
-	bool server_in_ep;
-
 	/* Buffers for both direction */
 	struct buffer_info request;
 	struct buffer_info response;
@@ -165,8 +161,6 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
 	conn->magic_client = EV_MAGIC_CLIENT;
 	conn->magic_server = EV_MAGIC_SERVER;
 	conn->state = S_INVALID;
-	conn->client_in_ep = false;
-	conn->server_in_ep = false;
 
 	return conn;
 }
@@ -240,20 +234,19 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	switch(conn->state) {
 		case S_FORWARDING:
 			/* Connection established, data forwarding in progress. */
-			if (conn->request.dlen) {
-				ev_svr.events |= EPOLLOUT;
-			} else {
+			if (conn->request.dlen < sizeof(conn->request.data))
 				ev_cli.events |= EPOLLIN;
-			}
-			if (conn->response.dlen) {
-				ev_cli.events |= EPOLLOUT;
-			} else {
+			if (conn->response.dlen < sizeof(conn->response.data))
 				ev_svr.events |= EPOLLIN;
-			}
+			if (conn->request.rpos < conn->request.dlen)
+				ev_svr.events |= EPOLLOUT;
+			if (conn->response.rpos < conn->response.dlen)
+				ev_cli.events |= EPOLLOUT;
 			break;
 		case S_SERVER_CONNECTING:
 			/* Wait for the server connection to establish. */
-			ev_cli.events |= EPOLLIN;  /* for detecting client close */
+			if (conn->request.dlen < sizeof(conn->request.data))
+				ev_cli.events |= EPOLLIN; /* for detecting client close */
 			ev_svr.events |= EPOLLOUT;
 			break;
 	}
@@ -286,6 +279,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	}
 	conn->cli_sock = cli_sock;
 	set_nonblock(conn->cli_sock);
+
 	conn->cli_addr = cli_addr;
 
 	/* Calculate address of the real server */
@@ -362,60 +356,77 @@ err:
 	return 0;
 }
 
-static int handle_server_connecting(struct proxy_conn *conn)
+static int handle_server_connecting(struct proxy_conn *conn, int efd)
 {
-	/* The connection has established or failed. */
-	int err = 0;
-	socklen_t errlen = sizeof(err);
-	
-	if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
-		syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(errno));
-		conn->state = S_CLOSING;
+	if (efd == conn->svr_sock) {
+		/* The connection has established or failed. */
+		int err = 0;
+		socklen_t errlen = sizeof(err);
+
+		if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
+			syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(errno));
+			goto err;
+		}
+		if (err != 0) {
+			syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(err));
+			goto err;
+		}
+
+		/* Connected, preparing for data forwarding. */
+		conn->state = S_SERVER_CONNECTED;
 		return 0;
+	} else {
+		/* Received data early before server connection is OK */
+		struct buffer_info *rxb = &conn->request;
+		int rc;
+
+		if ((rc = recv(efd , rxb->data + rxb->dlen,
+				sizeof(rxb->data) - rxb->dlen, 0)) <= 0)
+			goto err;
+		rxb->dlen += rc;
+
+		return -EAGAIN;
 	}
-	if (err != 0) {
-		syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(err));
-		conn->state = S_CLOSING;
-		return 0;
-	}
-	/* Connected, preparing for data forwarding. */
-	conn->state = S_SERVER_CONNECTED;
+
+err:
+	conn->state = S_CLOSING;
 	return 0;
 }
 
-static int handle_server_connected(struct proxy_conn *conn)
+static int handle_server_connected(struct proxy_conn *conn, int efd)
 {
 	conn->state = S_FORWARDING;
 	return -EAGAIN;
 }
 
-static int handle_forwarding(struct proxy_conn *conn, int epfd, struct epoll_event *ev)
+static int handle_forwarding(struct proxy_conn *conn, int efd, int epfd,
+		struct epoll_event *ev)
 {
-	int *evptr = (int *)ev->data.ptr;
 	struct buffer_info *rxb, *txb;
-	int efd, rc;
+	int rc;
 	char s_addr[50] = "";
 
-	if (*evptr == EV_MAGIC_CLIENT) {
-		efd = conn->cli_sock;
+	if (efd == conn->cli_sock) {
 		rxb = &conn->request;
 		txb = &conn->response;
 	} else {
-		efd = conn->svr_sock;
 		rxb = &conn->response;
 		txb = &conn->request;
 	}
 
 	if (ev->events & EPOLLIN) {
-		if ((rc = recv(efd , rxb->data, sizeof(rxb->data), 0)) <= 0)
+		if ((rc = recv(efd , rxb->data + rxb->dlen,
+				sizeof(rxb->data) - rxb->dlen, 0)) <= 0)
 			goto err;
-		rxb->dlen = rc;
+		rxb->dlen += rc;
+		/* FIXME: check buffer full? */
 	}
 
 	if (ev->events & EPOLLOUT) {
 		if ((rc = send(efd, txb->data + txb->rpos, txb->dlen - txb->rpos, 0)) <= 0)
 			goto err;
 		txb->rpos += rc;
+		/* Buffer consumed, empty it */
 		if (txb->rpos >= txb->dlen)
 			txb->rpos = txb->dlen = 0;
 	}
@@ -641,7 +652,7 @@ int main(int argc, char *argv[])
 		
 		for (i = 0; i < nfds; i++) {
 			struct epoll_event *evp = &events[i];
-			int *evptr = (int *)evp->data.ptr;
+			int *evptr = (int *)evp->data.ptr, efd = -1;
 			struct proxy_conn *conn;
 			int io_state = 0;
 			
@@ -657,8 +668,10 @@ int main(int argc, char *argv[])
 				init_new_conn_epoll_fds(conn, epfd);
 			} else if (*evptr == EV_MAGIC_CLIENT) {
 				conn = container_of(evptr, struct proxy_conn, magic_client);
+				efd = conn->cli_sock;
 			} else if (*evptr == EV_MAGIC_SERVER) {
 				conn = container_of(evptr, struct proxy_conn, magic_server);
+				efd = conn->svr_sock;
 			} else {
 				assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
 			}
@@ -672,13 +685,13 @@ int main(int argc, char *argv[])
 			while (conn->state != S_CLOSING && io_state == 0) {
 				switch (conn->state) {
 				case S_FORWARDING:
-					io_state = handle_forwarding(conn, epfd, evp);
+					io_state = handle_forwarding(conn, efd, epfd, evp);
 					break;
 				case S_SERVER_CONNECTING:
-					io_state = handle_server_connecting(conn);
+					io_state = handle_server_connecting(conn, efd);
 					break;
 				case S_SERVER_CONNECTED:
-					io_state = handle_server_connected(conn);
+					io_state = handle_server_connected(conn, efd);
 					break;
 				default:
 					syslog(LOG_ERR, "*** Undefined state: %d\n", conn->state);
