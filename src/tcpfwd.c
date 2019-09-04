@@ -23,7 +23,7 @@
 #endif
 
 typedef int bool;
-#define true  1
+#define true 1
 #define false 0
 
 struct sockaddr_inx {
@@ -34,18 +34,19 @@ struct sockaddr_inx {
 	};
 };
 
-#define port_of_sockaddr(s) ((s)->sa.sa_family == AF_INET6 ? \
+#define port_of_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? \
 		(s)->in6.sin6_port : (s)->in.sin_port)
-#define addr_of_sockaddr(s) ((s)->sa.sa_family == AF_INET6 ? \
+#define addr_of_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? \
 		(void *)&(s)->in6.sin6_addr : (void *)&(s)->in.sin_addr)
 #define sizeof_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? \
 		sizeof((s)->in6) : sizeof((s)->in))
 
-static struct sockaddr_inx g_src_sockaddr;
-static struct sockaddr_inx g_dst_sockaddr;
-static socklen_t g_src_addrlen;
-static socklen_t g_dst_addrlen;
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+static struct sockaddr_inx g_src_addr;
+static struct sockaddr_inx g_dst_addr;
 static bool g_base_addr_mode = false;
+static const char *g_pidfile;
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static int do_daemonize(void)
 {
@@ -72,14 +73,6 @@ static int do_daemonize(void)
 	return 0;
 }
 
-static int set_nonblock(int sfd)
-{
-	if (fcntl(sfd, F_SETFL,
-		fcntl(sfd, F_GETFD, 0) | O_NONBLOCK) == -1)
-		return -1;
-	return 0;
-}
-
 static void write_pidfile(const char *filepath)
 {
 	FILE *fp;
@@ -89,6 +82,57 @@ static void write_pidfile(const char *filepath)
 	}
 	fprintf(fp, "%d\n", (int)getpid());
 	fclose(fp);
+}
+
+static void set_nonblock(int sockfd)
+{
+	fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFD, 0) | O_NONBLOCK);
+}
+
+static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
+{
+	struct addrinfo hints, *result;
+	char host[51] = "", s_port[20] = "";
+	int port = 0, rc;
+
+	if (sscanf(pair, "[%50[^]]]:%d", host, &port) == 2) {
+		/* Quoted IP and port: [10.0.0.1]:10000 */
+	} else if (sscanf(pair, "%50[^:]:%d", host, &port) == 2) {
+		/* Regular IP and port: 10.0.0.1:10000 */
+	} else {
+		/**
+		 * A single port number, usually for local IPv4 listen address.
+		 * e.g., "10000" stands for "0.0.0.0:10000"
+		 */
+		const char *sp;
+		for (sp = pair; *sp; sp++) {
+			if (!(*sp >= '0' && *sp <= '9'))
+				return -EINVAL;
+		}
+		sscanf(pair, "%d", &port);
+		strcpy(host, "0.0.0.0");
+	}
+	sprintf(s_port, "%d", port);
+	if (port <= 0 || port > 65535)
+		return -EINVAL;
+
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = AF_UNSPEC;  /* Allow IPv4 or IPv6 */
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;  /* For wildcard IP address */
+	hints.ai_protocol = 0;        /* Any protocol */
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+
+	if ((rc = getaddrinfo(host, s_port, &hints, &result)))
+		return -EAGAIN;
+
+	/* Get the first resolution. */
+	memcpy(sa, result->ai_addr, result->ai_addrlen);
+
+	freeaddrinfo(result);
+	return 0;
 }
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
@@ -273,7 +317,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
-		syslog(LOG_ERR, "*** malloc(struct proxy_conn): %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** alloc_proxy_conn(): %s\n", strerror(errno));
 		close(cli_sock);
 		goto err;
 	}
@@ -283,7 +327,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	conn->cli_addr = cli_addr;
 
 	/* Calculate address of the real server */
-	conn->svr_addr = g_dst_sockaddr;
+	conn->svr_addr = g_dst_addr;
 #ifdef __linux__
 	if (g_base_addr_mode) {
 		if (conn->svr_addr.sa.sa_family == AF_INET) {
@@ -307,7 +351,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 			port_offset = (int)(ntohs(orig_dst.sin_port) - ntohs(loc_addr.sin_port));
 			svr_addr->sin_addr.s_addr = htonl(ntohl(svr_addr->sin_addr.s_addr) + port_offset);
 		} else {
-			syslog(LOG_ERR, "*** No IPv6 support for base address/port mapping mode.\n");
+			syslog(LOG_WARNING, "*** No IPv6 support for base address/port mapping mode.\n");
 		}
 	}
 #endif
@@ -321,7 +365,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 			s_addr2, ntohs(port_of_sockaddr(&conn->svr_addr)));
 
 	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(g_dst_sockaddr.sa.sa_family, SOCK_STREAM, 0)) < 0) {
+	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_STREAM, 0)) < 0) {
 		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
 		goto err;
 	}
@@ -329,7 +373,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	set_nonblock(conn->svr_sock);
 
 	if (connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
-			g_dst_addrlen) == 0) {
+			sizeof_sockaddr(&conn->svr_addr)) == 0) {
 		/* Connected, prepare for data forwarding. */
 		conn->state = S_SERVER_CONNECTED;
 		*conn_p = conn;
@@ -341,7 +385,9 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 		return -EAGAIN;
 	} else {
 		/* Error occurs, drop the session. */
-		syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(errno));
+		syslog(LOG_WARNING, "Connection to [%s]:%d failed: %s\n",
+				s_addr2, ntohs(port_of_sockaddr(&conn->svr_addr)),
+				strerror(errno));
 		goto err;
 	}
 
@@ -358,18 +404,21 @@ err:
 
 static int handle_server_connecting(struct proxy_conn *conn, int efd)
 {
+	char s_addr[50] = "";
+
 	if (efd == conn->svr_sock) {
 		/* The connection has established or failed. */
 		int err = 0;
 		socklen_t errlen = sizeof(err);
 
-		if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
-			syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(errno));
-			goto err;
-		}
-		if (err != 0) {
-			syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(err));
-			goto err;
+		if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0 || err) {
+			inet_ntop(conn->svr_addr.sa.sa_family, addr_of_sockaddr(&conn->svr_addr),
+					s_addr, sizeof(s_addr));
+			syslog(LOG_WARNING, "Connection to [%s]:%d failed: %s\n",
+					s_addr, ntohs(port_of_sockaddr(&conn->svr_addr)),
+					strerror(err ? err : errno));
+			conn->state = S_CLOSING;
+			return 0;
 		}
 
 		/* Connected, preparing for data forwarding. */
@@ -381,16 +430,18 @@ static int handle_server_connecting(struct proxy_conn *conn, int efd)
 		int rc;
 
 		if ((rc = recv(efd , rxb->data + rxb->dlen,
-				sizeof(rxb->data) - rxb->dlen, 0)) <= 0)
-			goto err;
+				sizeof(rxb->data) - rxb->dlen, 0)) <= 0) {
+			inet_ntop(conn->cli_addr.sa.sa_family, addr_of_sockaddr(&conn->cli_addr),
+					s_addr, sizeof(s_addr));
+			syslog(LOG_INFO, "Connection [%s]:%d closed during server handshake\n",
+					s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
+			conn->state = S_CLOSING;
+			return 0;
+		}
 		rxb->dlen += rc;
 
 		return -EAGAIN;
 	}
-
-err:
-	conn->state = S_CLOSING;
-	return 0;
 }
 
 static int handle_server_connected(struct proxy_conn *conn, int efd)
@@ -441,67 +492,30 @@ err:
 	return 0;
 }
 
-static int get_sockaddr_v4v6(const char *node, int port,
-		int socktype, int *family, struct sockaddr_inx *addr,
-		socklen_t *addrlen)
-{
-	struct addrinfo hints, *result;
-	char s_port[12];
-	int rc;
-
-	sprintf(s_port, "%d", port);
-	memset(&hints, 0, sizeof(struct addrinfo));
-	hints.ai_family = *family;    /* Allow IPv4 or IPv6 */
-	hints.ai_socktype = socktype;
-	hints.ai_flags = AI_PASSIVE;    /* For wildcard IP address */
-	hints.ai_protocol = 0;          /* Any protocol */
-	hints.ai_canonname = NULL;
-	hints.ai_addr = NULL;
-	hints.ai_next = NULL;
-	
-	if ((rc = getaddrinfo(node, s_port, &hints, &result))) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
-		return -1;
-	}
-	
-	/* Get the first resolved address */
-	*family = result->ai_family;
-	*addrlen = result->ai_addrlen;
-	memcpy(addr, result->ai_addr, result->ai_addrlen);
-	freeaddrinfo(result);
-	return 0;
-}
-
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static void show_help(int argc, char *argv[])
 {
 	printf("Userspace TCP proxy.\n");
 	printf("Usage:\n");
-	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o] [-f6.4] [-b]\n", argv[0]);
+	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o] [-b]\n", argv[0]);
 	printf("Options:\n");
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
 	printf("  -b              base address to port mapping mode\n");
-	printf("  -f X.Y          allow address families for source|destination\n");
 	printf("  -p <pidfile>    write PID to file\n");
 }
 
 int main(int argc, char *argv[])
 {
-	int lsn_sock;
-	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
-	int b_sockopt = 1, opt;
+	int opt, b_true = 1, lsn_sock, epfd;
 	bool is_daemon = false, is_v6only = false;
-	const char *pidfile = NULL;
-	char s_src_host[50], s_dst_host[50], s_af1[10], s_af2[10];
-	int src_port, dst_port;
-	int rc, epfd, af1 = 0, af2 = 0;
 	struct epoll_event ev, events[MAX_POLL_EVENTS];
 	size_t events_sz = MAX_POLL_EVENTS;
 	int ev_magic_listener = EV_MAGIC_LISTENER;
+	char s_addr1[50] = "", s_addr2[50] = "";
 
-	while ((opt = getopt(argc, argv, "dhobf:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "dhobp:")) != -1) {
 		switch (opt) {
 		case 'd':
 			is_daemon = true;
@@ -517,27 +531,7 @@ int main(int argc, char *argv[])
 			g_base_addr_mode = true;
 			break;
 		case 'p':
-			pidfile = optarg;
-			break;
-		case 'f':
-			rc = sscanf(optarg, "%5[^.].%5s", s_af1, s_af2);
-			if (rc == 2) {
-				sscanf(s_af1, "%d", &af1);
-				sscanf(s_af2, "%d", &af2);
-			} else {
-				fprintf(stderr, "*** Invalid address families: %s\n", optarg);
-				exit(1);
-			}
-			if (af1 == 4) {
-				src_family = AF_INET;
-			} else if (af1 == 6) {
-				src_family = AF_INET6;
-			}
-			if (af2 == 4) {
-				dst_family = AF_INET;
-			} else if (af2 == 6) {
-				dst_family = AF_INET6;
-			}
+			g_pidfile = optarg;
 			break;
 		case '?':
 			exit(1);
@@ -549,73 +543,52 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	openlog("tcpfwd", LOG_PID|LOG_PERROR|LOG_NDELAY, LOG_USER);
-
-	/* Parse source address. */
-	if (sscanf(argv[optind], "[%40[^]]]:%d", s_src_host, &src_port) == 2) {
-	} else if (sscanf(argv[optind], "%40[^:]:%d", s_src_host, &src_port) == 2) {
-	} else if (sscanf(argv[optind], "%d", &src_port) == 1) {
-		strcpy(s_src_host, "0.0.0.0");
-	} else {
+	/* Resolve source address */
+	if (get_sockaddr_inx_pair(argv[optind], &g_src_addr) < 0) {
 		fprintf(stderr, "*** Invalid source address '%s'.\n", argv[optind]);
 		exit(1);
 	}
 	optind++;
 
-	/* Parse destination address. */
-	if (sscanf(argv[optind], "[%40[^]]]:%d", s_dst_host,
-		&dst_port) == 2) {
-	} else if (sscanf(argv[optind], "%40[^:]:%d", s_dst_host,
-		&dst_port) == 2) {
-	} else {
-		fprintf(stderr, "*** Invalid destination address '%s'.\n", argv[optind]);
+	/* Resolve destination addresse */
+	if (get_sockaddr_inx_pair(argv[optind], &g_dst_addr) < 0) {
+		fprintf(stderr, "*** Invalid source address '%s'.\n", argv[optind]);
 		exit(1);
 	}
 	optind++;
 
-	/* Resolve the addresses */
-	if (get_sockaddr_v4v6(s_src_host, src_port, SOCK_STREAM, &src_family,
-			&g_src_sockaddr, &g_src_addrlen)) {
-		fprintf(stderr, "*** Invalid source address.\n");
-		exit(1);
-	}
-	if (get_sockaddr_v4v6(s_dst_host, dst_port, SOCK_STREAM, &dst_family,
-			&g_dst_sockaddr, &g_dst_addrlen)) {
-		fprintf(stderr, "*** Invalid destination address.\n");
-		exit(1);
-	}
-	
-	lsn_sock = socket(g_src_sockaddr.sa.sa_family, SOCK_STREAM, 0);
+	openlog("tcpfwd", LOG_PID|LOG_PERROR|LOG_NDELAY, LOG_USER);
+
+	lsn_sock = socket(g_src_addr.sa.sa_family, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
-		fprintf(stderr, "*** socket() failed: %s.\n", strerror(errno));
+		fprintf(stderr, "*** socket(): %s.\n", strerror(errno));
 		exit(1);
 	}
-
-	b_sockopt = 1;
-	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_sockopt, sizeof(b_sockopt));
-
-	if (g_src_sockaddr.sa.sa_family == AF_INET6 && is_v6only) {
-		b_sockopt = 1;
-		setsockopt(lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_sockopt, sizeof(b_sockopt));
-	}
-	
-	if (bind(lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
-		fprintf(stderr, "*** bind() failed: %s.\n", strerror(errno));
+	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_true, sizeof(b_true));
+	if (g_src_addr.sa.sa_family == AF_INET6 && is_v6only)
+		setsockopt(lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_true, sizeof(b_true));
+	if (bind(lsn_sock, (struct sockaddr *)&g_src_addr,
+			sizeof_sockaddr(&g_src_addr)) < 0) {
+		fprintf(stderr, "*** bind(): %s.\n", strerror(errno));
 		exit(1);
 	}
-
 	if (listen(lsn_sock, 100) < 0) {
-		fprintf(stderr, "*** listen() failed: %s.\n", strerror(errno));
+		fprintf(stderr, "*** listen(): %s.\n", strerror(errno));
 		exit(1);
 	}
-
 	set_nonblock(lsn_sock);
 
-	syslog(LOG_INFO, "TCP proxy %s:%d -> %s:%d\n", s_src_host, src_port, s_dst_host, dst_port);
+	inet_ntop(g_src_addr.sa.sa_family, addr_of_sockaddr(&g_src_addr),
+			s_addr1, sizeof(s_addr1));
+	inet_ntop(g_dst_addr.sa.sa_family, addr_of_sockaddr(&g_dst_addr),
+			s_addr2, sizeof(s_addr2));
+	syslog(LOG_INFO, "TCP proxy %s:%d -> %s:%d\n",
+			s_addr1, ntohs(port_of_sockaddr(&g_src_addr)),
+			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
 	/* Create epoll table. */
 	if ((epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
-		syslog(LOG_ERR, "*** epoll_create() failed: %s\n", strerror(errno));
+		syslog(LOG_ERR, "epoll_create(): %s\n", strerror(errno));
 		exit(1);
 	}
 
@@ -623,8 +596,8 @@ int main(int argc, char *argv[])
 	if (is_daemon)
 		do_daemonize();
 
-	if (pidfile)
-		write_pidfile(pidfile);
+	if (g_pidfile)
+		write_pidfile(g_pidfile);
 
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
