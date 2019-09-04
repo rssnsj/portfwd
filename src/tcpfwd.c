@@ -28,37 +28,23 @@ typedef int bool;
 #define true  1
 #define false 0
 
-//static unsigned int   g_source_ip   = 0;
-//static unsigned short g_source_port = 0;
-//static unsigned int   g_dest_ip     = 0;
-//static unsigned short g_dest_port   = 0;
+struct sockaddr_inx {
+	union {
+		struct sockaddr sa;
+		struct sockaddr_in in;
+		struct sockaddr_in6 in6;
+	};
+};
 
-static struct sockaddr_storage g_src_sockaddr;
-static struct sockaddr_storage g_dst_sockaddr;
+#define port_of_sockaddr(s) ((s)->sa.sa_family == AF_INET6 ? (s)->in6.sin6_port : (s)->in.sin_port)
+#define addr_of_sockaddr(s) ((s)->sa.sa_family == AF_INET6 ? (void *)&(s)->in6.sin6_addr : (void *)&(s)->in.sin_addr)
+#define sizeof_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? sizeof((s)->in6) : sizeof((s)->in))
+
+static struct sockaddr_inx g_src_sockaddr;
+static struct sockaddr_inx g_dst_sockaddr;
 static socklen_t g_src_addrlen;
 static socklen_t g_dst_addrlen;
 static bool g_base_addr_mode = false;
-
-static char *sockaddr_to_print(const void *addr,
-		char *host, int *port)
-{
-	const union __sa_union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in sa4;
-		struct sockaddr_in6 sa6;
-	} *sa = addr;
-	
-	if (sa->ss.ss_family == AF_INET) {
-		inet_ntop(AF_INET, &sa->sa4.sin_addr, host, 16);
-		*port = ntohs(sa->sa4.sin_port);
-	} else if (sa->ss.ss_family == AF_INET6) {
-		inet_ntop(AF_INET6, &sa->sa6.sin6_addr, host, 40);
-		*port = ntohs(sa->sa6.sin6_port);
-	} else {
-		return NULL;
-	}
-	return host;
-}
 
 static int do_daemonize(void)
 {
@@ -124,19 +110,15 @@ enum conn_state {
 
 enum ev_magic {
 	EV_MAGIC_LISTENER = 0x1010,
-	EV_MAGIC_CLIENT = 0x2010,
-	EV_MAGIC_SERVER = 0x3020,
+	EV_MAGIC_CLIENT   = 0x2020,
+	EV_MAGIC_SERVER   = 0x3030,
 };
 
 struct buffer_info {
-	char *buf;
+	char data[4096];
 	unsigned rpos;
 	unsigned dlen;
-	unsigned size;
 };
-
-#define REQ_BUFFER_SIZE 8192
-#define RSP_BUFFER_SIZE 8192
 
 /**
  * Connection tracking information to indicate
@@ -147,43 +129,27 @@ struct proxy_conn {
 	int svr_sock;
 
 	/**
-	 * The two fields are used when an epoll event occur,
-	 *  to know on which socket fd it is triggered,
-	 *  client or server.
-	 *  ev.data.ptr = &ct.ev_client;
+	 * The two fields are used when an epoll event occurs,
+	 * to know on which socket fd it is triggered client
+	 * or server.
+	 * ev.data.ptr = &ct.magic_client;
 	 */
-	int ev_client;
-	int ev_server;
+	int magic_client;
+	int magic_server;
 	unsigned short state;
 
-	/* Memorize the session addresses. */
-	struct sockaddr_storage cli_addr;
-	struct sockaddr_storage svr_addr;
+	/* Remember the session addresses */
+	struct sockaddr_inx cli_addr;
+	struct sockaddr_inx svr_addr;
 
-	/* To know if the fds are already added to epoll. */
+	/* To know if the fds are already added to epoll */
 	bool client_in_ep;
 	bool server_in_ep;
 
-	/* Buffers for both direction. */
+	/* Buffers for both direction */
 	struct buffer_info request;
 	struct buffer_info response;
 };
-
-/**
- * Get 'conn' structure by passing the ev.data.ptr
- * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
- *  or EV_MAGIC_SERVER.
- */
-static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
-{
-	if (*evptr == EV_MAGIC_CLIENT)
-		return container_of(evptr, struct proxy_conn, ev_client);
-	else if (*evptr == EV_MAGIC_SERVER)
-		return container_of(evptr, struct proxy_conn, ev_server);
-	else
-		assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
-	return NULL;
-}
 
 static inline struct proxy_conn *alloc_proxy_conn(void)
 {
@@ -192,10 +158,11 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
 	if (!(conn = malloc(sizeof(*conn))))
 		return NULL;
 	memset(conn, 0x0, sizeof(*conn));
+
 	conn->cli_sock = -1;
 	conn->svr_sock = -1;
-	conn->ev_client = EV_MAGIC_CLIENT;
-	conn->ev_server = EV_MAGIC_SERVER;
+	conn->magic_client = EV_MAGIC_CLIENT;
+	conn->magic_server = EV_MAGIC_SERVER;
 	conn->state = S_INVALID;
 	conn->client_in_ep = false;
 	conn->server_in_ep = false;
@@ -208,38 +175,50 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
  *  from the current ready list.
  */
 static inline void release_proxy_conn(struct proxy_conn *conn,
-		struct epoll_event *pending_evs, int pending_fds)
+		struct epoll_event *pending_evs, int pending_fds, int epfd)
 {
 	int i;
-	struct epoll_event *ev;
 	
 	/**
 	 * Clear possible fd events that might belong to current
 	 *  connection. The event must be cleared or an invalid
 	 *  pointer might be accessed.
 	 */
-	if (conn->client_in_ep || conn->server_in_ep) {
-		for (i = 0; i < pending_fds; i++) {
-			ev = &pending_evs[i];
-			if (ev->data.ptr == &conn->ev_client ||
-				ev->data.ptr == &conn->ev_server) {
-				ev->data.ptr = NULL;
-				break;
-			}
+	for (i = 0; i < pending_fds; i++) {
+		struct epoll_event *ev = &pending_evs[i];
+		if (ev->data.ptr == &conn->magic_client ||
+			ev->data.ptr == &conn->magic_server) {
+			ev->data.ptr = NULL;
+			break;
 		}
 	}
-	
-	if (conn->cli_sock >= 0)
-		close(conn->cli_sock);
-	if (conn->svr_sock >= 0)
-		close(conn->svr_sock);
-	
-	if (conn->request.buf)
-		free(conn->request.buf);
-	if (conn->response.buf)
-		free(conn->response.buf);
-	
+
+	if (epfd >= 0) {
+		if (conn->cli_sock >= 0) {
+			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->cli_sock, NULL);
+			close(conn->cli_sock);
+		}
+		if (conn->svr_sock >= 0) {
+			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
+			close(conn->svr_sock);
+		}
+	}
+
 	free(conn);
+}
+
+static void init_new_conn_epoll_fds(struct proxy_conn *conn, int epfd)
+{
+	struct epoll_event ev_cli, ev_svr;
+
+	ev_cli.events = EPOLLIN;
+	ev_cli.data.ptr = &conn->magic_client;
+
+	ev_svr.events = EPOLLIN;
+	ev_svr.data.ptr = &conn->magic_server;
+
+	epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev_cli);
+	epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev_svr);
 }
 
 /**
@@ -252,67 +231,44 @@ static void set_conn_epoll_fds(struct proxy_conn *conn, int epfd)
 	struct epoll_event ev_cli, ev_svr;
 	
 	ev_cli.events = 0;
+	ev_cli.data.ptr = &conn->magic_client;
+
 	ev_svr.events = 0;
-	
+	ev_svr.data.ptr = &conn->magic_server;
+
 	switch(conn->state) {
 		case S_FORWARDING:
 			/* Connection established, data forwarding in progress. */
-			if (!conn->request.dlen && !conn->response.dlen) {
-				ev_cli.events = EPOLLIN;
-				ev_svr.events = EPOLLIN;
-			} else if (conn->request.dlen && !conn->response.dlen) {
-				ev_svr.events = EPOLLIN | EPOLLOUT;
-			} else if (!conn->request.dlen && conn->response.dlen) {
-				ev_cli.events = EPOLLIN | EPOLLOUT;
+			if (conn->request.dlen) {
+				ev_svr.events |= EPOLLOUT;
 			} else {
-				ev_cli.events = EPOLLOUT;
-				ev_svr.events = EPOLLOUT;
+				ev_cli.events |= EPOLLIN;
+			}
+			if (conn->response.dlen) {
+				ev_cli.events |= EPOLLOUT;
+			} else {
+				ev_svr.events |= EPOLLIN;
 			}
 			break;
 		case S_SERVER_CONNECTING:
 			/* Wait for the server connection to establish. */
-			ev_cli.events = EPOLLIN;  /* for detecting client close */
-			ev_svr.events = EPOLLOUT;
+			ev_cli.events |= EPOLLIN;  /* for detecting client close */
+			ev_svr.events |= EPOLLOUT;
 			break;
 	}
-	
-	if (ev_cli.events) {
-		ev_cli.data.ptr = &conn->ev_client;
-		if (conn->client_in_ep) {
-			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev_cli); /* FIXME: result */
-		} else {
-			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->cli_sock, &ev_cli);
-		}
-		conn->client_in_ep = true;
-	} else {
-		if (conn->client_in_ep)
-			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->cli_sock, NULL);
-		conn->client_in_ep = false;
-	}
-	
-	if (ev_svr.events) {
-		ev_svr.data.ptr = &conn->ev_server;
-		if (conn->server_in_ep) {
-			epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev_svr);
-		} else {
-			epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev_svr);
-		}
-		conn->server_in_ep = true;
-	} else {
-		if (conn->server_in_ep)
-			epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
-		conn->server_in_ep = false;
-	}
+
+	/* Reset epoll status */
+	epoll_ctl(epfd, EPOLL_CTL_MOD, conn->cli_sock, &ev_cli);
+	epoll_ctl(epfd, EPOLL_CTL_MOD, conn->svr_sock, &ev_svr);
 }
 
 static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 {
 	int cli_sock, svr_sock;
-	struct sockaddr_storage cli_addr;
+	struct sockaddr_inx cli_addr;
 	socklen_t cli_alen = sizeof(cli_addr);
 	struct proxy_conn *conn = NULL;
-	char s1[44] = "", s2[44] = "";
-	int n1 = 0, n2 = 0;
+	char s_addr1[50] = "", s_addr2[50] = "";
 
 	cli_sock = accept(sockfd, (struct sockaddr *)&cli_addr, &cli_alen);
 	if (cli_sock < 0) {
@@ -323,8 +279,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
-		fprintf(stderr, "*** malloc(struct proxy_conn): %s\n",
-				strerror(errno));
+		fprintf(stderr, "*** malloc(struct proxy_conn): %s\n", strerror(errno));
 		close(cli_sock);
 		goto err;
 	}
@@ -336,7 +291,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	conn->svr_addr = g_dst_sockaddr;
 #ifdef __linux__
 	if (g_base_addr_mode) {
-		if (conn->svr_addr.ss_family == AF_INET) {
+		if (conn->svr_addr.sa.sa_family == AF_INET) {
 			struct sockaddr_in *svr_addr = (struct sockaddr_in *)&conn->svr_addr;
 			struct sockaddr_in loc_addr, orig_dst;
 			socklen_t loc_alen = sizeof(loc_addr), orig_alen = sizeof(orig_dst);
@@ -362,20 +317,24 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	}
 #endif
 
-	sockaddr_to_print(&conn->cli_addr, s1, &n1);
-	sockaddr_to_print(&conn->svr_addr, s2, &n2);
-	printf("Proxying [%s]:%d to [%s]:%d\n", s1, n1, s2, n2);
+	inet_ntop(conn->cli_addr.sa.sa_family, addr_of_sockaddr(&conn->cli_addr),
+			s_addr1, sizeof(s_addr1));
+	inet_ntop(conn->svr_addr.sa.sa_family, addr_of_sockaddr(&conn->svr_addr),
+			s_addr2, sizeof(s_addr2));
+	printf("New connection [%s]:%d -> [%s]:%d\n",
+			s_addr1, ntohs(port_of_sockaddr(&conn->cli_addr)),
+			s_addr2, ntohs(port_of_sockaddr(&conn->svr_addr)));
 
 	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(g_dst_sockaddr.ss_family, SOCK_STREAM, 0)) < 0) {
-		fprintf(stderr, "*** socket(svr_sock) error: %s\n", strerror(errno));
+	if ((svr_sock = socket(g_dst_sockaddr.sa.sa_family, SOCK_STREAM, 0)) < 0) {
+		fprintf(stderr, "*** socket(svr_sock): %s\n", strerror(errno));
 		goto err;
 	}
 	conn->svr_sock = svr_sock;
 	set_nonblock(conn->svr_sock);
 
-	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
-			g_dst_addrlen)) == 0) {
+	if (connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
+			g_dst_addrlen) == 0) {
 		/* Connected, prepare for data forwarding. */
 		conn->state = S_SERVER_CONNECTED;
 		*conn_p = conn;
@@ -397,7 +356,7 @@ err:
 	 * so don't need the caller to release anything
 	 */
 	if (conn)
-		release_proxy_conn(conn, NULL, 0);
+		release_proxy_conn(conn, NULL, 0, -1);
 	*conn_p = NULL;
 	return 0;
 }
@@ -425,28 +384,17 @@ static int handle_server_connecting(struct proxy_conn *conn)
 
 static int handle_server_connected(struct proxy_conn *conn)
 {
-	/* Allocate both buffers. */
-	conn->request.size = REQ_BUFFER_SIZE;
-	conn->response.size = RSP_BUFFER_SIZE;
-	conn->request.buf = (char *)malloc(conn->request.size);
-	conn->response.buf = (char *)malloc(conn->response.size);
-	if (!conn->request.buf || !conn->response.buf) {
-		fprintf(stderr, "*** Failed to allocate either request or response buffers.\n");
-		conn->state = S_CLOSING;
-		return 0;
-	}
-
 	conn->state = S_FORWARDING;
 	return -EAGAIN;
 }
 
-static int handle_forwarding(struct proxy_conn *conn, int epfd,
-		struct epoll_event *ev)
+static int handle_forwarding(struct proxy_conn *conn, int epfd, struct epoll_event *ev)
 {
 	int *evptr = (int *)ev->data.ptr;
 	struct buffer_info *rxb, *txb;
 	int efd, rc;
-	
+	char s_addr[50] = "";
+
 	if (*evptr == EV_MAGIC_CLIENT) {
 		efd = conn->cli_sock;
 		rxb = &conn->request;
@@ -456,27 +404,16 @@ static int handle_forwarding(struct proxy_conn *conn, int epfd,
 		rxb = &conn->response;
 		txb = &conn->request;
 	}
-	
+
 	if (ev->events & EPOLLIN) {
-		if ((rc = recv(efd , rxb->buf, rxb->size, 0)) <= 0) {
-			char s1[44] = ""; int n1 = 0;
-			sockaddr_to_print(&conn->cli_addr, s1, &n1);
-			printf("Client [%s]:%d exits\n", s1, n1);
-			conn->state = S_CLOSING;
-			return 0;
-		}
-		rxb->dlen = (unsigned)rc;
+		if ((rc = recv(efd , rxb->data, sizeof(rxb->data), 0)) <= 0)
+			goto err;
+		rxb->dlen = rc;
 	}
-	
+
 	if (ev->events & EPOLLOUT) {
-		if ((rc = send(efd, txb->buf + txb->rpos,
-			txb->dlen - txb->rpos, 0)) <= 0) {
-			char s1[44] = ""; int n1 = 0;
-			sockaddr_to_print(&conn->cli_addr, s1, &n1);
-			printf("Client [%s]:%d exits\n", s1, n1);
-			conn->state = S_CLOSING;
-			return 0;
-		}
+		if ((rc = send(efd, txb->data + txb->rpos, txb->dlen - txb->rpos, 0)) <= 0)
+			goto err;
 		txb->rpos += rc;
 		if (txb->rpos >= txb->dlen)
 			txb->rpos = txb->dlen = 0;
@@ -484,10 +421,16 @@ static int handle_forwarding(struct proxy_conn *conn, int epfd,
 
 	/* I/O not ready, handle in next event. */
 	return -EAGAIN;
+
+err:
+	inet_ntop(conn->cli_addr.sa.sa_family, addr_of_sockaddr(&conn->cli_addr), s_addr, sizeof(s_addr));
+	printf("Connection [%s]:%d closed\n", s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
+	conn->state = S_CLOSING;
+	return 0;
 }
 
 static int get_sockaddr_v4v6(const char *node, int port,
-		int socktype, int *family, struct sockaddr_storage *addr,
+		int socktype, int *family, struct sockaddr_inx *addr,
 		socklen_t *addrlen)
 {
 	struct addrinfo hints, *result;
@@ -631,7 +574,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 	
-	lsn_sock = socket(g_src_sockaddr.ss_family, SOCK_STREAM, 0);
+	lsn_sock = socket(g_src_sockaddr.sa.sa_family, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
 		fprintf(stderr, "*** socket() failed: %s.\n", strerror(errno));
 		exit(1);
@@ -640,7 +583,7 @@ int main(int argc, char *argv[])
 	b_sockopt = 1;
 	setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_sockopt, sizeof(b_sockopt));
 
-	if (g_src_sockaddr.ss_family == AF_INET6 && is_v6only) {
+	if (g_src_sockaddr.sa.sa_family == AF_INET6 && is_v6only) {
 		b_sockopt = 1;
 		setsockopt(lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_sockopt, sizeof(b_sockopt));
 	}
@@ -713,8 +656,13 @@ int main(int argc, char *argv[])
 				io_state = handle_accept_new_connection(lsn_sock, &conn);
 				if (!conn)
 					continue;
+				init_new_conn_epoll_fds(conn, epfd);
+			} else if (*evptr == EV_MAGIC_CLIENT) {
+				conn = container_of(evptr, struct proxy_conn, magic_client);
+			} else if (*evptr == EV_MAGIC_SERVER) {
+				conn = container_of(evptr, struct proxy_conn, magic_server);
 			} else {
-				conn = get_conn_by_evptr(evptr);
+				assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
 			}
 			
 			/**
@@ -742,7 +690,7 @@ int main(int argc, char *argv[])
 			}
 
 			if (conn->state == S_CLOSING) {
-				release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
+				release_proxy_conn(conn, events + i + 1, nfds - 1 - i, epfd);
 			} else {
 				set_conn_epoll_fds(conn, epfd);
 			}
