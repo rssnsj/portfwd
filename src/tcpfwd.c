@@ -322,7 +322,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 			s_addr1, sizeof(s_addr1));
 	inet_ntop(conn->svr_addr.sa.sa_family, addr_of_sockaddr(&conn->svr_addr),
 			s_addr2, sizeof(s_addr2));
-	printf("New connection [%s]:%d -> [%s]:%d\n",
+	syslog(LOG_INFO, "New connection [%s]:%d -> [%s]:%d\n",
 			s_addr1, ntohs(port_of_sockaddr(&conn->cli_addr)),
 			s_addr2, ntohs(port_of_sockaddr(&conn->svr_addr)));
 
@@ -425,7 +425,7 @@ static int handle_forwarding(struct proxy_conn *conn, int epfd, struct epoll_eve
 
 err:
 	inet_ntop(conn->cli_addr.sa.sa_family, addr_of_sockaddr(&conn->cli_addr), s_addr, sizeof(s_addr));
-	printf("Connection [%s]:%d closed\n", s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
+	syslog(LOG_INFO, "Connection [%s]:%d closed\n", s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
 	conn->state = S_CLOSING;
 	return 0;
 }
