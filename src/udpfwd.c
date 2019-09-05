@@ -297,7 +297,7 @@ static struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
 	
 	/* If the table is full, try to recycle idle entries. */
 	if (h_table_len(ht) >= ht->max_len) {
-		fprintf(stderr, "-- ht->len: %d, ht->max_len: %d\n", (int)ht->len, (int)ht->max_len);
+		syslog(LOG_ERR, "-- ht->len: %d, ht->max_len: %d\n", (int)ht->len, (int)ht->max_len);
 		return NULL;
 	}
 	
@@ -337,7 +337,7 @@ static void h_entry_put(struct h_cache *he)
 			he->last_put = time(NULL);
 			list_add_tail(&he->idle_list, &ht->idle_queue);
 		} else {
-			fprintf(stderr, "%s(): entry(0x%08lx) is already in idle queue!\n",
+			syslog(LOG_ERR, "%s(): entry(0x%08lx) is already in idle queue!\n",
 				__FUNCTION__, (unsigned long)he);
 		}
 	}
@@ -425,7 +425,7 @@ static int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
 	for (__size = size - 1, i = 0; __size; __size >>= 1, i++);
 	__size = (1UL << i);
 	if (size != __size) {
-		fprintf(stderr, "%s() Warning: size '%lu' is accepted as '%lu'.\n",
+		syslog(LOG_ERR, "%s() Warning: size '%lu' is accepted as '%lu'.\n",
 			__FUNCTION__, (unsigned long)size, (unsigned long)__size);
 		size = __size;
 	}
@@ -457,7 +457,7 @@ static int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
 		ht->table_type = table_type;
 		break;
 	default:
-		fprintf(stderr, "Invalid table type %d.\n", table_type);
+		syslog(LOG_ERR, "Invalid table type %d.\n", table_type);
 		return -EINVAL;
 	}
 
@@ -724,15 +724,14 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
-		fprintf(stderr, "*** malloc(struct proxy_conn) error: %s\n",
-				strerror(errno));
+		syslog(LOG_ERR, "*** alloc_proxy_conn(): %s\n", strerror(errno));
 		return NULL;
 	}
 	conn->cli_addr = *cli_addr;
 	
 	/* Initiate the connection to server right now. */
 	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
-		fprintf(stderr, "*** socket(svr_sock) error: %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
 		/**
 		 * 'conn' has only been used among this function,
 		 *  so don't need the caller to release anything.
@@ -757,7 +756,7 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 		return conn;
 	} else {
 		/* Error occurs, drop the session. */
-		fprintf(stderr, "*** Connection failed: %s\n", strerror(errno));
+		syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(errno));
 		release_proxy_conn(conn, NULL, 0);
 		return NULL;
 	}
