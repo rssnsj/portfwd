@@ -1,5 +1,5 @@
-#ifndef __EPOLL_SELECT_H
-#define __EPOLL_SELECT_H
+#ifndef __NO_EPOLL_H
+#define __NO_EPOLL_H
 
 #include <stdint.h>
 #include <stdio.h>
@@ -11,15 +11,15 @@
 int build_error_on_linking = 0;
 
 typedef union epoll_data {
-	void    *ptr;
-	int      fd;
+	void *ptr;
+	int fd;
 	uint32_t u32;
 	uint64_t u64;
 } epoll_data_t;
 
 struct epoll_event {
-	uint32_t     events; /* Epoll events */
-	epoll_data_t data;   /* User data variable */
+	uint32_t events; /* epoll events */
+	epoll_data_t data; /* user data variable */
 };
 
 
@@ -146,4 +146,4 @@ static int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int t
 	return nr_events;
 }
 
-#endif /* __EPOLL_SELECT_H */
+#endif /* __NO_EPOLL_H */

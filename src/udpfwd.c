@@ -11,7 +11,7 @@
 	#include <sys/epoll.h>
 #else
 	#define ERESTART 700
-	#include "ps_epoll.h"
+	#include "no-epoll.h"
 #endif
 #include <sys/types.h>
 #include <sys/ioctl.h>

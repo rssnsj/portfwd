@@ -19,7 +19,7 @@
 	#include <linux/netfilter_ipv4.h>
 #else
 	#define ERESTART 700
-	#include "ps_epoll.h"
+	#include "no-epoll.h"
 #endif
 
 typedef int bool;

@@ -1,11 +1,11 @@
 CC ?= $(CROSS_COMPILE)gcc
 PREFIX ?= /usr/local
-CFLAGS += -g
+# CFLAGS += -g
 
 ifeq ($(shell uname), Linux)
 #LDFLAGS += -levent
 else
-HEADERS += ps_epoll.h
+HEADERS += no-epoll.h
 endif
 
 all: tcpfwd udpfwd
