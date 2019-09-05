@@ -26,6 +26,12 @@ typedef int bool;
 #define true 1
 #define false 0
 
+#define countof(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+#define container_of(ptr, type, member) ({			\
+	const typeof(((type *)0)->member) * __mptr = (ptr);	\
+	(type *)((char *)__mptr - offsetof(type, member)); })
+
 struct sockaddr_inx {
 	union {
 		struct sockaddr sa;
@@ -42,10 +48,12 @@ struct sockaddr_inx {
 		sizeof((s)->in6) : sizeof((s)->in))
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+
 static struct sockaddr_inx g_src_addr;
 static struct sockaddr_inx g_dst_addr;
 static bool g_base_addr_mode = false;
 static const char *g_pidfile;
+
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static int do_daemonize(void)
@@ -137,13 +145,6 @@ static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
-#define EPOLL_TABLE_SIZE 2048
-#define MAX_POLL_EVENTS 100
-
-#define container_of(ptr, type, member) ({			\
-	const typeof(((type *)0)->member) * __mptr = (ptr);	\
-	(type *)((char *)__mptr - offsetof(type, member)); })
-
 /* Statues indicators of proxy sessions. */
 enum conn_state {
 	S_INVALID,
@@ -217,7 +218,7 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 		struct epoll_event *pending_evs, int pending_fds, int epfd)
 {
 	int i;
-	
+
 	/**
 	 * Clear possible fd events that might belong to current
 	 *  connection. The event must be cleared or an invalid
@@ -510,8 +511,7 @@ int main(int argc, char *argv[])
 {
 	int opt, b_true = 1, lsn_sock, epfd;
 	bool is_daemon = false, is_v6only = false;
-	struct epoll_event ev, events[MAX_POLL_EVENTS];
-	size_t events_sz = MAX_POLL_EVENTS;
+	struct epoll_event ev, events[100];
 	int ev_magic_listener = EV_MAGIC_LISTENER;
 	char s_addr1[50] = "", s_addr2[50] = "";
 
@@ -552,7 +552,7 @@ int main(int argc, char *argv[])
 
 	/* Resolve destination addresse */
 	if (get_sockaddr_inx_pair(argv[optind], &g_dst_addr) < 0) {
-		fprintf(stderr, "*** Invalid source address '%s'.\n", argv[optind]);
+		fprintf(stderr, "*** Invalid destination address '%s'.\n", argv[optind]);
 		exit(1);
 	}
 	optind++;
@@ -587,7 +587,7 @@ int main(int argc, char *argv[])
 			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
 	/* Create epoll table. */
-	if ((epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
+	if ((epfd = epoll_create(2048)) < 0) {
 		syslog(LOG_ERR, "epoll_create(): %s\n", strerror(errno));
 		exit(1);
 	}
@@ -601,7 +601,7 @@ int main(int argc, char *argv[])
 
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
-	 *  a half-closed socket which causes process to abort.
+	 * a half-closed socket which causes process to abort
 	 */
 	signal(SIGPIPE, SIG_IGN);
 
@@ -612,8 +612,8 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		int nfds, i;
-		
-		nfds = epoll_wait(epfd, events, events_sz, 1000 * 2);
+
+		nfds = epoll_wait(epfd, events, countof(events), 1000 * 2);
 		if (nfds == 0)
 			continue;
 		if (nfds < 0) {
@@ -622,7 +622,7 @@ int main(int argc, char *argv[])
 			syslog(LOG_ERR, "*** epoll_wait(): %s\n", strerror(errno));
 			exit(1);
 		}
-		
+
 		for (i = 0; i < nfds; i++) {
 			struct epoll_event *evp = &events[i];
 			int *evptr = (int *)evp->data.ptr, efd = -1;

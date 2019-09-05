@@ -1,46 +1,56 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
+#include <stddef.h>
 #include <unistd.h>
+#include <errno.h>
+#include <assert.h>
+#include <syslog.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stddef.h>
-#include <assert.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <time.h>
+
 #ifdef __linux__
 	#include <sys/epoll.h>
 #else
 	#define ERESTART 700
 	#include "no-epoll.h"
 #endif
-#include <sys/types.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/resource.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <time.h>
 
 typedef int bool;
-#define true  1
+#define true 1
 #define false 0
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+#define countof(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-#include <sys/types.h>
-#include <stddef.h>
-
-/**
- * container_of - cast a member of a structure out to the containing structure
- * @ptr:	the pointer to the member.
- * @type:	the type of the container struct this is embedded in.
- * @member:	the name of the member within the struct.
- *
- */
 #define container_of(ptr, type, member) ({			\
 	const typeof(((type *)0)->member) * __mptr = (ptr);	\
 	(type *)((char *)__mptr - offsetof(type, member)); })
+
+struct sockaddr_inx {
+	union {
+		struct sockaddr sa;
+		struct sockaddr_in in;
+		struct sockaddr_in6 in6;
+	};
+};
+
+#define port_of_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? \
+		(s)->in6.sin6_port : (s)->in.sin_port)
+#define addr_of_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? \
+		(void *)&(s)->in6.sin6_addr : (void *)&(s)->in.sin_addr)
+#define sizeof_sockaddr(s)  ((s)->sa.sa_family == AF_INET6 ? \
+		sizeof((s)->in6) : sizeof((s)->in))
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+
+#include <sys/types.h>
+#include <stddef.h>
 
 /*
  * These are non-NULL pointers that will result in page faults
@@ -461,29 +471,16 @@ static inline int h_table_create(struct h_table *ht,
 	return __h_table_create(ht, H_TABLE_TYPE_CACHE, base, size, max_len, timeo, ops);
 }
 
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+static struct sockaddr_inx g_src_addr;
+static struct sockaddr_inx g_dst_addr;
+static const char *g_pidfile;
+static struct h_table g_conn_tbl;
+static int g_lsn_sock = -1;
+static int g_epfd = -1;
 
-static char *sockaddr_to_print(const void *addr,
-		char *host, int *port)
-{
-	const union __sa_union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in sa4;
-		struct sockaddr_in6 sa6;
-	} *sa = addr;
-	
-	if (sa->ss.ss_family == AF_INET) {
-		inet_ntop(AF_INET, &sa->sa4.sin_addr, host, 16);
-		*port = ntohs(sa->sa4.sin_port);
-	} else if (sa->ss.ss_family == AF_INET6) {
-		inet_ntop(AF_INET6, &sa->sa6.sin6_addr, host, 40);
-		*port = ntohs(sa->sa6.sin6_port);
-	} else {
-		return NULL;
-	}
-	return host;
-}
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static int do_daemonize(void)
 {
@@ -510,37 +507,69 @@ static int do_daemonize(void)
 	return 0;
 }
 
-static int set_nonblock(int sfd)
-{
-	if (fcntl(sfd, F_SETFL,
-		fcntl(sfd, F_GETFD, 0) | O_NONBLOCK) == -1)
-		return -1;
-	return 0;
-}
-
 static void write_pidfile(const char *filepath)
 {
 	FILE *fp;
 	if (!(fp = fopen(filepath, "w"))) {
-		fprintf(stderr, "*** fopen() failed: %s\n", strerror(errno));
+		fprintf(stderr, "*** fopen(%s): %s\n", filepath, strerror(errno));
 		exit(1);
 	}
 	fprintf(fp, "%d\n", (int)getpid());
 	fclose(fp);
 }
 
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+static void set_nonblock(int sockfd)
+{
+	fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFD, 0) | O_NONBLOCK);
+}
 
-#define EPOLL_TABLE_SIZE 2048
-#define MAX_POLL_EVENTS 100
+static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
+{
+	struct addrinfo hints, *result;
+	char host[51] = "", s_port[20] = "";
+	int port = 0, rc;
 
-static struct sockaddr_storage g_src_sockaddr;
-static struct sockaddr_storage g_dst_sockaddr;
-static socklen_t g_src_addrlen;
-static socklen_t g_dst_addrlen;
-static struct h_table g_conn_tbl;
-static int g_lsn_sock = -1;
-static int g_epfd = -1;
+	if (sscanf(pair, "[%50[^]]]:%d", host, &port) == 2) {
+		/* Quoted IP and port: [10.0.0.1]:10000 */
+	} else if (sscanf(pair, "%50[^:]:%d", host, &port) == 2) {
+		/* Regular IP and port: 10.0.0.1:10000 */
+	} else {
+		/**
+		 * A single port number, usually for local IPv4 listen address.
+		 * e.g., "10000" stands for "0.0.0.0:10000"
+		 */
+		const char *sp;
+		for (sp = pair; *sp; sp++) {
+			if (!(*sp >= '0' && *sp <= '9'))
+				return -EINVAL;
+		}
+		sscanf(pair, "%d", &port);
+		strcpy(host, "0.0.0.0");
+	}
+	sprintf(s_port, "%d", port);
+	if (port <= 0 || port > 65535)
+		return -EINVAL;
+
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = AF_UNSPEC;  /* Allow IPv4 or IPv6 */
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;  /* For wildcard IP address */
+	hints.ai_protocol = 0;        /* Any protocol */
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+
+	if ((rc = getaddrinfo(host, s_port, &hints, &result)))
+		return -EAGAIN;
+
+	/* Get the first resolution. */
+	memcpy(sa, result->ai_addr, result->ai_addrlen);
+
+	freeaddrinfo(result);
+	return 0;
+}
+
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 /**
  * Connection tracking information to indicate
@@ -550,35 +579,30 @@ struct proxy_conn {
 	struct h_cache h_cache;
 	time_t last_active;
 	int svr_sock;
-	/* Memorize the session addresses. */
-	struct sockaddr_storage cli_addr;
-	socklen_t cli_alen;
-	struct sockaddr_storage svr_addr;
+	/* Remember the session addresses */
+	struct sockaddr_inx cli_addr;
+	struct sockaddr_inx svr_addr;
 };
 
 static inline void release_proxy_conn(struct proxy_conn *conn,
 		struct epoll_event *pending_evs, int pending_fds);
 static inline struct proxy_conn *alloc_proxy_conn(void);
 static struct proxy_conn *new_connection(int lsn_sock, int epfd,
-		struct sockaddr_storage *cli_addr, int *error);
+		struct sockaddr_inx *cli_addr, int *error);
 
 static unsigned int proxy_conn_hash_fn(void *key)
 {
-	const union __sa_union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in sa4;
-		struct sockaddr_in6 sa6;
-	} *sa = key;
+	struct sockaddr_inx *sa = key;
 	unsigned int hash = 0;
 	
-	if (sa->ss.ss_family == AF_INET) {
-		hash = ntohl(sa->sa4.sin_addr.s_addr) +
-			ntohs(sa->sa4.sin_port);		
-	} else if (sa->ss.ss_family == AF_INET6) {
+	if (sa->sa.sa_family == AF_INET) {
+		hash = ntohl(sa->in.sin_addr.s_addr) +
+			ntohs(sa->in.sin_port);
+	} else if (sa->sa.sa_family == AF_INET6) {
 		int i;
 		for (i = 0; i < 4; i++)
-			hash += ((uint32_t *)&sa->sa6.sin6_addr)[i];
-		hash += ntohs(sa->sa6.sin6_port);
+			hash += ((uint32_t *)&sa->in6.sin6_addr)[i];
+		hash += ntohs(sa->in6.sin6_port);
 	}
 	
 	return hash;
@@ -587,25 +611,21 @@ static unsigned int proxy_conn_hash_fn(void *key)
 static int proxy_conn_key_cmp_fn(struct h_cache *he, void *key)
 {
 	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
-	const union __sa_union {
-		struct sockaddr_storage ss;
-		struct sockaddr_in sa4;
-		struct sockaddr_in6 sa6;
-	} *sa = key, *k = (void *)&conn->cli_addr;
-	
-	if (sa->ss.ss_family != k->ss.ss_family)
+	struct sockaddr_inx *sa = key, *k = &conn->cli_addr;
+
+	if (sa->sa.sa_family != k->sa.sa_family)
 		return 1;
 	
-	if (sa->ss.ss_family == AF_INET) {
-		if (sa->sa4.sin_addr.s_addr != k->sa4.sin_addr.s_addr)
+	if (sa->sa.sa_family == AF_INET) {
+		if (sa->in.sin_addr.s_addr != k->in.sin_addr.s_addr)
 			return 1;
-		if (sa->sa4.sin_port != k->sa4.sin_port)
+		if (sa->in.sin_port != k->in.sin_port)
 			return 1;
 		return 0;
-	} else if (sa->ss.ss_family == AF_INET6) {
-		if (memcmp(&sa->sa6.sin6_addr, &k->sa6.sin6_addr, sizeof(k->sa6.sin6_addr)))
+	} else if (sa->sa.sa_family == AF_INET6) {
+		if (memcmp(&sa->in6.sin6_addr, &k->in6.sin6_addr, sizeof(k->in6.sin6_addr)))
 			return 1;
-		if (sa->sa6.sin6_port != k->sa6.sin6_port)
+		if (sa->in6.sin6_port != k->in6.sin6_port)
 			return 1;
 		return 0;
 	}
@@ -627,12 +647,13 @@ static struct h_operations proxy_conn_hops = {
 
 static struct h_cache *__proxy_conn_create_fn(struct h_table *ht, void *key)
 {
-	struct sockaddr_storage *cli_addr = key;
+	struct sockaddr_inx *cli_addr = key;
 	struct proxy_conn *conn;
 	int rc;
 
 	if (!(conn = new_connection(g_lsn_sock, g_epfd, cli_addr, &rc)))
 		return NULL;
+
 	return &conn->h_cache;
 }
 
@@ -641,7 +662,6 @@ static void __proxy_conn_modify_fn(struct h_cache *he, void *key)
 	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
 	conn->last_active = time(NULL);
 }
-
 
 
 /**
@@ -661,8 +681,10 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
 	if (!(conn = malloc(sizeof(*conn))))
 		return NULL;
 	memset(conn, 0x0, sizeof(*conn));
+
 	conn->svr_sock = -1;
 	conn->last_active = time(NULL);
+
 	return conn;
 }
 
@@ -674,33 +696,31 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 		struct epoll_event *pending_evs, int pending_fds)
 {
 	int i;
-	struct epoll_event *ev;
-	
+
 	/**
 	 * Clear possible fd events that might belong to current
 	 *  connection. The event must be cleared or an invalid
 	 *  pointer might be accessed.
 	 */
 	for (i = 0; i < pending_fds; i++) {
-		ev = &pending_evs[i];
-		if (ev->data.ptr == (void *)conn) {
+		struct epoll_event *ev = &pending_evs[i];
+		if (ev->data.ptr == conn) {
 			ev->data.ptr = NULL;
 			break;
 		}
 	}
-	
+
 	if (conn->svr_sock >= 0)
 		close(conn->svr_sock);
-	
+
 	free(conn);
 }
 
 static struct proxy_conn *new_connection(int lsn_sock, int epfd,
-		struct sockaddr_storage *cli_addr, int *error)
+		struct sockaddr_inx *cli_addr, int *error)
 {
 	struct proxy_conn *conn;
 	int svr_sock;
-	char s1[44] = ""; int n1 = 0;
 
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
@@ -711,7 +731,7 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 	conn->cli_addr = *cli_addr;
 	
 	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(g_dst_sockaddr.ss_family, SOCK_DGRAM, 0)) < 0) {
+	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
 		fprintf(stderr, "*** socket(svr_sock) error: %s\n", strerror(errno));
 		/**
 		 * 'conn' has only been used among this function,
@@ -722,14 +742,12 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 	}
 	conn->svr_sock = svr_sock;
 	set_nonblock(conn->svr_sock);
-	
-	/* Connect to real server. */
-	conn->svr_addr = g_dst_sockaddr;
 
-	sockaddr_to_print(&conn->cli_addr, s1, &n1);
-	
-	if ((connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
-		g_dst_addrlen)) == 0) {
+	/* Connect to real server. */
+	conn->svr_addr = g_dst_addr;
+
+	if (connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
+			sizeof_sockaddr(&conn->svr_addr)) == 0) {
 		/* Connected, prepare for data forwarding. */
 		struct epoll_event ev;
 		ev.data.ptr = conn;
@@ -745,7 +763,7 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 	}
 }
 
-static struct proxy_conn *get_conn_by_cli_addr(struct sockaddr_storage *cli_addr)
+static struct proxy_conn *get_conn_by_cli_addr(struct sockaddr_inx *cli_addr)
 {
 	struct h_cache *he;
 	
@@ -758,38 +776,7 @@ static struct proxy_conn *get_conn_by_cli_addr(struct sockaddr_storage *cli_addr
 	return container_of(he, struct proxy_conn, h_cache);
 }
 
-static int get_sockaddr_v4v6(const char *node, int port,
-		int socktype, int *family, struct sockaddr_storage *addr,
-		socklen_t *addrlen)
-{
-	struct addrinfo hints, *result;
-	char s_port[12];
-	int rc;
-
-	sprintf(s_port, "%d", port);
-	memset(&hints, 0, sizeof(struct addrinfo));
-	hints.ai_family = *family;    /* Allow IPv4 or IPv6 */
-	hints.ai_socktype = socktype;
-	hints.ai_flags = AI_PASSIVE;  /* For wildcard IP address */
-	hints.ai_protocol = 0;        /* Any protocol */
-	hints.ai_canonname = NULL;
-	hints.ai_addr = NULL;
-	hints.ai_next = NULL;
-	
-	if ((rc = getaddrinfo(node, s_port, &hints, &result))) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
-		return -1;
-	}
-	
-	/* Get the first resolved address */
-	*family = result->ai_family;
-	*addrlen = result->ai_addrlen;
-	memcpy(addr, result->ai_addr, result->ai_addrlen);
-	freeaddrinfo(result);
-	return 0;
-}
-
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
+/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static void show_help(int argc, char *argv[])
 {
@@ -805,18 +792,14 @@ static void show_help(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-	int src_family = AF_UNSPEC, dst_family = AF_UNSPEC;
+	int opt, b_true = 1, rc;
 	bool is_daemon = false, is_v6only = false;
-	const char *pidfile = NULL;
-	char s_src_host[50], s_dst_host[50], s_af1[10], s_af2[10];
-	int src_port, dst_port;
-	struct epoll_event ev, events[MAX_POLL_EVENTS];
-	size_t events_sz = MAX_POLL_EVENTS;
+	struct epoll_event ev, events[100];
 	char buffer[1024 * 64];
 	time_t last_check, __last_check;
-	int b_sockopt = 1, opt, rc, af1 = 0, af2 = 0;
+	char s_addr1[50] = "", s_addr2[50] = "";
 
-	while ((opt = getopt(argc, argv, "dhof:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "dhop:")) != -1) {
 		switch (opt) {
 		case 'd':
 			is_daemon = true;
@@ -829,27 +812,7 @@ int main(int argc, char *argv[])
 			is_v6only = true;
 			break;
 		case 'p':
-			pidfile = optarg;
-			break;
-		case 'f':
-			rc = sscanf(optarg, "%5[^.].%5s", s_af1, s_af2);
-			if (rc == 2) {
-				sscanf(s_af1, "%d", &af1);
-				sscanf(s_af2, "%d", &af2);
-			} else {
-				fprintf(stderr, "*** Invalid address families: %s\n", optarg);
-				exit(1);
-			}
-			if (af1 == 4) {
-				src_family = AF_INET;
-			} else if (af1 == 6) {
-				src_family = AF_INET6;
-			}
-			if (af2 == 4) {
-				dst_family = AF_INET;
-			} else if (af2 == 6) {
-				dst_family = AF_INET6;
-			}
+			g_pidfile = optarg;
 			break;
 		case '?':
 			exit(1);
@@ -861,68 +824,47 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	/* Parse source address. */
-	if (sscanf(argv[optind], "[%40[^]]]:%d", s_src_host,
-		&src_port) == 2) {
-	} else if (sscanf(argv[optind], "%40[^:]:%d", s_src_host,
-		&src_port) == 2) {
-	} else if (sscanf(argv[optind], "%d", &src_port) == 1) {
-		strcpy(s_src_host, "0.0.0.0");
-	} else {
-		fprintf(stderr, "*** Invalid source address '%s'.\n",
-				argv[optind]);
+	/* Resolve source address */
+	if (get_sockaddr_inx_pair(argv[optind], &g_src_addr) < 0) {
+		fprintf(stderr, "*** Invalid source address '%s'.\n", argv[optind]);
 		exit(1);
 	}
 	optind++;
 
-	/* Parse destination address. */
-	if (sscanf(argv[optind], "[%40[^]]]:%d", s_dst_host,
-		&dst_port) == 2) {
-	} else if (sscanf(argv[optind], "%40[^:]:%d", s_dst_host,
-		&dst_port) == 2) {
-	} else {
-		fprintf(stderr, "*** Invalid destination address '%s'.\n",
-				argv[optind]);
+	/* Resolve destination addresse */
+	if (get_sockaddr_inx_pair(argv[optind], &g_dst_addr) < 0) {
+		fprintf(stderr, "*** Invalid destination address '%s'.\n", argv[optind]);
 		exit(1);
 	}
+	optind++;
 
-	/* Resolve the addresses */
-	if (get_sockaddr_v4v6(s_src_host, src_port, SOCK_DGRAM,
-		&src_family, &g_src_sockaddr, &g_src_addrlen)) {
-		fprintf(stderr, "*** Invalid source address.\n");
-		exit(1);
-	}
-	if (get_sockaddr_v4v6(s_dst_host, dst_port, SOCK_DGRAM,
-		&dst_family, &g_dst_sockaddr, &g_dst_addrlen)) {
-		fprintf(stderr, "*** Invalid destination address.\n");
-		exit(1);
-	}
-	
-	g_lsn_sock = socket(g_src_sockaddr.ss_family, SOCK_DGRAM, 0);
+	openlog("udpfwd", LOG_PID|LOG_PERROR|LOG_NDELAY, LOG_USER);
+
+	g_lsn_sock = socket(g_src_addr.sa.sa_family, SOCK_DGRAM, 0);
 	if (g_lsn_sock < 0) {
-		fprintf(stderr, "*** socket() failed: %s.\n", strerror(errno));
+		fprintf(stderr, "*** socket(): %s.\n", strerror(errno));
 		exit(1);
 	}
-
-	if (g_src_sockaddr.ss_family == AF_INET6 && is_v6only) {
-		b_sockopt = 1;
-		setsockopt(g_lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_sockopt, sizeof(b_sockopt));
-	}
-
-	if (bind(g_lsn_sock, (struct sockaddr *)&g_src_sockaddr, g_src_addrlen) < 0) {
-		fprintf(stderr, "*** bind() failed: %s.\n", strerror(errno));
+	if (g_src_addr.sa.sa_family == AF_INET6 && is_v6only)
+		setsockopt(g_lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_true, sizeof(b_true));
+	if (bind(g_lsn_sock, (struct sockaddr *)&g_src_addr,
+			sizeof_sockaddr(&g_src_addr)) < 0) {
+		fprintf(stderr, "*** bind(): %s.\n", strerror(errno));
 		exit(1);
 	}
-
 	set_nonblock(g_lsn_sock);
-	
-	printf("UDP proxy %s:%d -> %s:%d started \n",
-		   s_src_host, src_port, s_dst_host, dst_port);
+
+	inet_ntop(g_src_addr.sa.sa_family, addr_of_sockaddr(&g_src_addr),
+			s_addr1, sizeof(s_addr1));
+	inet_ntop(g_dst_addr.sa.sa_family, addr_of_sockaddr(&g_dst_addr),
+			s_addr2, sizeof(s_addr2));
+	syslog(LOG_INFO, "UDP proxy %s:%d -> %s:%d \n",
+			s_addr1, ntohs(port_of_sockaddr(&g_src_addr)),
+			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
 	/* Create epoll table. */
-	if ((g_epfd = epoll_create(EPOLL_TABLE_SIZE)) < 0) {
-		fprintf(stderr, "*** epoll_create() failed: %s\n",
-				strerror(errno));
+	if ((g_epfd = epoll_create(2048)) < 0) {
+		syslog(LOG_ERR, "epoll_create(): %s\n", strerror(errno));
 		exit(1);
 	}
 
@@ -930,8 +872,8 @@ int main(int argc, char *argv[])
 	if (is_daemon)
 		do_daemonize();
 
-	if (pidfile)
-		write_pidfile(pidfile);
+	if (g_pidfile)
+		write_pidfile(g_pidfile);
 
 	/* Create session hash table. */
 	rc = h_table_create(&g_conn_tbl, NULL, 512, 2048, 60, &proxy_conn_hops);
@@ -942,7 +884,7 @@ int main(int argc, char *argv[])
 
 	/**
 	 * Ignore PIPE signal, which is triggered when send() to
-	 *  a half-closed socket which causes process to abort.
+	 * a half-closed socket which causes process to abort
 	 */
 	signal(SIGPIPE, SIG_IGN);
 
@@ -963,36 +905,34 @@ int main(int argc, char *argv[])
 			last_check = __last_check;
 		}
 
-		nfds = epoll_wait(g_epfd, events, events_sz, 1000 * 1);
+		nfds = epoll_wait(g_epfd, events, countof(events), 1000 * 1);
 		if (nfds == 0)
 			continue;
 		if (nfds < 0) {
 			if (errno == EINTR || errno == ERESTART)
 				continue;
-			fprintf(stderr, "*** epoll_wait() error: %s\n", strerror(errno));
+			syslog(LOG_ERR, "*** epoll_wait(): %s\n", strerror(errno));
 			exit(1);
 		}
-		
+
 		for (i = 0; i < nfds; i++) {
 			struct epoll_event *evp = &events[i];
 			int *evptr = (int *)evp->data.ptr;
 			struct proxy_conn *conn;
 			int rlen;
 			
-			/* NULL evp->data.ptr indicates this connection is closed. */
-			if (evptr == NULL)
+			if (evptr == NULL) {
+				/* 'evptr = NULL' indicates the socket is closed. */
 				continue;
-			
-			if (evptr == &g_lsn_sock) {
+			} else if (evptr == &g_lsn_sock) {
 				/* Data from client. */
-				struct sockaddr_storage cli_addr;
-				socklen_t __cli_alen = sizeof(cli_addr);
-				if ((rlen = recvfrom(g_lsn_sock, buffer, sizeof(buffer),
-					0, (struct sockaddr *)&cli_addr, &__cli_alen)) <= 0)
+				struct sockaddr_inx cli_addr;
+				socklen_t cli_alen = sizeof(cli_addr);
+				if ((rlen = recvfrom(g_lsn_sock, buffer, sizeof(buffer), 0,
+						(struct sockaddr *)&cli_addr, &cli_alen)) <= 0)
 					continue;
 				if (!(conn = get_conn_by_cli_addr(&cli_addr)))
 					continue;
-				conn->cli_alen = __cli_alen;
 				send(conn->svr_sock, buffer, (size_t)rlen, 0);
 				/* FIXME: Need to care 'rc'? */
 			} else {
@@ -1005,14 +945,14 @@ int main(int argc, char *argv[])
 					continue;
 				}
 				sendto(g_lsn_sock, buffer, rlen, 0, (struct sockaddr *)&conn->cli_addr,
-						conn->cli_alen);
+						sizeof_sockaddr(&conn->cli_addr));
 				/* FIXME: Need to care 'rc'? */
 			}
 		}
 	}
 
 	h_table_release(&g_conn_tbl);
-	
+
 	return 0;
 }
 
