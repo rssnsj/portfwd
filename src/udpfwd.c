@@ -382,11 +382,12 @@ static int h_table_release(struct h_table *ht)
 static void __h_table_timeo_check(struct h_table *ht)
 {
 	struct h_cache *he;
+	time_t current_ts = time(NULL);
 
 	while (!list_empty(&ht->idle_queue)) {
 		he = list_first_entry(&ht->idle_queue, struct h_cache, idle_list);
 
-		if ((time(NULL) - he->last_put <= ht->timeo) &&
+		if ((current_ts - he->last_put <= ht->timeo) &&
 			(h_table_len(ht) < ht->max_len * 9 / 10) )
 			break;
 
@@ -397,7 +398,7 @@ static void __h_table_timeo_check(struct h_table *ht)
 		h_table_len_dec(ht);
 	} /* while(!list_empty(&ht->idle_queue)) */
 	
-	printf("-- Live entries: %d\n", (int)ht->len);
+	printf("Live entries: %d\n", (int)ht->len);
 }
 
 /*
@@ -588,7 +589,7 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 		struct epoll_event *pending_evs, int pending_fds);
 static inline struct proxy_conn *alloc_proxy_conn(void);
 static struct proxy_conn *new_connection(int lsn_sock, int epfd,
-		struct sockaddr_inx *cli_addr, int *error);
+		struct sockaddr_inx *cli_addr);
 
 static unsigned int proxy_conn_hash_fn(void *key)
 {
@@ -649,9 +650,8 @@ static struct h_cache *__proxy_conn_create_fn(struct h_table *ht, void *key)
 {
 	struct sockaddr_inx *cli_addr = key;
 	struct proxy_conn *conn;
-	int rc;
 
-	if (!(conn = new_connection(g_lsn_sock, g_epfd, cli_addr, &rc)))
+	if (!(conn = new_connection(g_lsn_sock, g_epfd, cli_addr)))
 		return NULL;
 
 	return &conn->h_cache;
@@ -717,7 +717,7 @@ static inline void release_proxy_conn(struct proxy_conn *conn,
 }
 
 static struct proxy_conn *new_connection(int lsn_sock, int epfd,
-		struct sockaddr_inx *cli_addr, int *error)
+		struct sockaddr_inx *cli_addr)
 {
 	struct proxy_conn *conn;
 	int svr_sock;
@@ -752,11 +752,10 @@ static struct proxy_conn *new_connection(int lsn_sock, int epfd,
 		ev.data.ptr = conn;
 		ev.events = EPOLLIN;
 		epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-		*error = 0;
 		return conn;
 	} else {
 		/* Error occurs, drop the session. */
-		syslog(LOG_WARNING, "*** Connection failed: %s\n", strerror(errno));
+		syslog(LOG_WARNING, "Connection failed: %s\n", strerror(errno));
 		release_proxy_conn(conn, NULL, 0);
 		return NULL;
 	}
@@ -781,11 +780,10 @@ static void show_help(int argc, char *argv[])
 {
 	printf("User space UDP proxy.\n");
 	printf("Usage:\n");
-	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o] [-f6.4]\n", argv[0]);
+	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o]\n", argv[0]);
 	printf("Options:\n");
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
-	printf("  -f X.Y          allow address families for source|destination\n");
 	printf("  -p <pidfile>    write PID to file\n");
 }
 
@@ -795,7 +793,7 @@ int main(int argc, char *argv[])
 	bool is_daemon = false, is_v6only = false;
 	struct epoll_event ev, events[100];
 	char buffer[1024 * 64];
-	time_t last_check, __last_check;
+	time_t last_check;
 	char s_addr1[50] = "", s_addr2[50] = "";
 
 	while ((opt = getopt(argc, argv, "dhop:")) != -1) {
@@ -857,7 +855,7 @@ int main(int argc, char *argv[])
 			s_addr1, sizeof(s_addr1));
 	inet_ntop(g_dst_addr.sa.sa_family, addr_of_sockaddr(&g_dst_addr),
 			s_addr2, sizeof(s_addr2));
-	syslog(LOG_INFO, "UDP proxy %s:%d -> %s:%d \n",
+	syslog(LOG_INFO, "UDP proxy [%s]:%d -> [%s]:%d\n",
 			s_addr1, ntohs(port_of_sockaddr(&g_src_addr)),
 			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
@@ -896,12 +894,12 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		int nfds, i;
+		time_t current_ts = time(NULL);
 
 		/* Timeout check and recycle */
-		__last_check = time(NULL);
-		if (__last_check >= last_check + 2) {
+		if ((unsigned)(current_ts - last_check) >= 5) {
 			__h_table_timeo_check(&g_conn_tbl);
-			last_check = __last_check;
+			last_check = current_ts;
 		}
 
 		nfds = epoll_wait(g_epfd, events, countof(events), 1000 * 1);

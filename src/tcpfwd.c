@@ -582,7 +582,7 @@ int main(int argc, char *argv[])
 			s_addr1, sizeof(s_addr1));
 	inet_ntop(g_dst_addr.sa.sa_family, addr_of_sockaddr(&g_dst_addr),
 			s_addr2, sizeof(s_addr2));
-	syslog(LOG_INFO, "TCP proxy %s:%d -> %s:%d\n",
+	syslog(LOG_INFO, "TCP proxy [%s]:%d -> [%s]:%d\n",
 			s_addr1, ntohs(port_of_sockaddr(&g_src_addr)),
 			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
