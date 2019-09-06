@@ -350,11 +350,10 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 
 		if (conn->svr_addr.sa.sa_family == AF_INET) {
 			addr_pos = (__be32 *)&conn->svr_addr.in.sin_addr;
-			port_offset = (int)(ntohs(orig_dst.in.sin_port) - ntohs(loc_addr.in.sin_port));
 		} else {
 			addr_pos = (__be32 *)&conn->svr_addr.in6.sin6_addr.s6_addr32[3];
-			port_offset = (int)(ntohs(orig_dst.in6.sin6_port) - ntohs(loc_addr.in6.sin6_port));
 		}
+		port_offset = (int)(ntohs(port_of_sockaddr(&orig_dst)) - ntohs(port_of_sockaddr(&loc_addr)));
 
 		*addr_pos = htonl(ntohl(*addr_pos) + port_offset);
 	}
