@@ -22,6 +22,7 @@
 	#include "no-epoll.h"
 #endif
 
+typedef uint32_t __be32;
 typedef int bool;
 #define true 1
 #define false 0
@@ -331,29 +332,31 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	conn->svr_addr = g_dst_addr;
 #ifdef __linux__
 	if (g_base_addr_mode) {
-		if (conn->svr_addr.sa.sa_family == AF_INET) {
-			struct sockaddr_in *svr_addr = (struct sockaddr_in *)&conn->svr_addr;
-			struct sockaddr_in loc_addr, orig_dst;
-			socklen_t loc_alen = sizeof(loc_addr), orig_alen = sizeof(orig_dst);
-			int port_offset = 0;
+		struct sockaddr_inx loc_addr, orig_dst;
+		socklen_t loc_alen = sizeof(loc_addr), orig_alen = sizeof(orig_dst);
+		int port_offset = 0;
+		__be32 *addr_pos = NULL;
 
-			memset(&loc_addr, 0x0, sizeof(loc_addr));
-			memset(&orig_dst, 0x0, sizeof(orig_dst));
-
-			if (getsockname(conn->cli_sock, (struct sockaddr *)&loc_addr, &loc_alen)) {
-				syslog(LOG_ERR, "*** getsockname(): %s.\n", strerror(errno));
-				goto err;
-			}
-			if (getsockopt(conn->cli_sock, SOL_IP, SO_ORIGINAL_DST, &orig_dst, &orig_alen)) {
-				syslog(LOG_ERR, "*** getsockopt(SO_ORIGINAL_DST): %s.\n", strerror(errno));
-				goto err;
-			}
-
-			port_offset = (int)(ntohs(orig_dst.sin_port) - ntohs(loc_addr.sin_port));
-			svr_addr->sin_addr.s_addr = htonl(ntohl(svr_addr->sin_addr.s_addr) + port_offset);
-		} else {
-			syslog(LOG_WARNING, "*** No IPv6 support for base address/port mapping mode.\n");
+		memset(&loc_addr, 0x0, sizeof(loc_addr));
+		memset(&orig_dst, 0x0, sizeof(orig_dst));
+		if (getsockname(conn->cli_sock, (struct sockaddr *)&loc_addr, &loc_alen)) {
+			syslog(LOG_ERR, "*** getsockname(): %s.\n", strerror(errno));
+			goto err;
 		}
+		if (getsockopt(conn->cli_sock, SOL_IP, SO_ORIGINAL_DST, &orig_dst, &orig_alen)) {
+			syslog(LOG_ERR, "*** getsockopt(SO_ORIGINAL_DST): %s.\n", strerror(errno));
+			goto err;
+		}
+
+		if (conn->svr_addr.sa.sa_family == AF_INET) {
+			addr_pos = (__be32 *)&conn->svr_addr.in.sin_addr;
+			port_offset = (int)(ntohs(orig_dst.in.sin_port) - ntohs(loc_addr.in.sin_port));
+		} else {
+			addr_pos = (__be32 *)&conn->svr_addr.in6.sin6_addr.s6_addr32[3];
+			port_offset = (int)(ntohs(orig_dst.in6.sin6_port) - ntohs(loc_addr.in6.sin6_port));
+		}
+
+		*addr_pos = htonl(ntohl(*addr_pos) + port_offset);
 	}
 #endif
 
