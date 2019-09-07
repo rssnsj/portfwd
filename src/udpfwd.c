@@ -553,7 +553,7 @@ static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
 
 	memset(&hints, 0, sizeof(struct addrinfo));
 	hints.ai_family = AF_UNSPEC;  /* Allow IPv4 or IPv6 */
-	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_socktype = SOCK_DGRAM;
 	hints.ai_flags = AI_PASSIVE;  /* For wildcard IP address */
 	hints.ai_protocol = 0;        /* Any protocol */
 	hints.ai_canonname = NULL;
