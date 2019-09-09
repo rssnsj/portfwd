@@ -457,15 +457,17 @@ static int handle_forwarding(struct proxy_conn *conn, int efd, int epfd,
 		struct epoll_event *ev)
 {
 	struct buffer_info *rxb, *txb;
-	int rc;
+	int noefd, rc;
 	char s_addr[50] = "";
 
 	if (efd == conn->cli_sock) {
 		rxb = &conn->request;
 		txb = &conn->response;
+		noefd = conn->svr_sock;
 	} else {
 		rxb = &conn->response;
 		txb = &conn->request;
+		noefd = conn->cli_sock;
 	}
 
 	if (ev->events & EPOLLIN) {
@@ -473,7 +475,13 @@ static int handle_forwarding(struct proxy_conn *conn, int efd, int epfd,
 				sizeof(rxb->data) - rxb->dlen, 0)) <= 0)
 			goto err;
 		rxb->dlen += rc;
-		/* FIXME: check buffer full? */
+		/* Try if we can send it out */
+		if ((rc = send(noefd, rxb->data + rxb->rpos, rxb->dlen - rxb->rpos, 0)) > 0) {
+			rxb->rpos += rc;
+			/* Buffer consumed, empty it */
+			if (rxb->rpos >= rxb->dlen)
+				rxb->rpos = rxb->dlen = 0;
+		}
 	}
 
 	if (ev->events & EPOLLOUT) {
