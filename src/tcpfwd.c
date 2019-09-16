@@ -146,7 +146,7 @@ static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
-/* Statues indicators of proxy sessions. */
+/* Status indicators of proxy sessions */
 enum conn_state {
 	S_INVALID,
 	S_SERVER_CONNECTING,
@@ -215,7 +215,7 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
  * Close both sockets of the connection and remove it
  *  from the current ready list.
  */
-static inline void release_proxy_conn(struct proxy_conn *conn,
+static void release_proxy_conn(struct proxy_conn *conn,
 		struct epoll_event *pending_evs, int pending_fds, int epfd)
 {
 	int i;
@@ -602,17 +602,11 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	/* Run in background. */
 	if (is_daemon)
 		do_daemonize();
-
 	if (g_pidfile)
 		write_pidfile(g_pidfile);
 
-	/**
-	 * Ignore PIPE signal, which is triggered when send() to
-	 * a half-closed socket which causes process to abort
-	 */
 	signal(SIGPIPE, SIG_IGN);
 
 	/* epoll loop */
@@ -638,11 +632,12 @@ int main(int argc, char *argv[])
 			int *evptr = (int *)evp->data.ptr, efd = -1;
 			struct proxy_conn *conn;
 			int io_state = 0;
-			
-			if (evptr == NULL) {
-				/* 'evptr = NULL' indicates the socket is closed. */
+
+			/* 'evptr = NULL' indicates the socket is closed. */
+			if (evptr == NULL)
 				continue;
-			} else if (*evptr == EV_MAGIC_LISTENER) {
+
+			if (*evptr == EV_MAGIC_LISTENER) {
 				/* A new connection */
 				conn = NULL;
 				io_state = handle_accept_new_connection(lsn_sock, &conn);
@@ -658,7 +653,7 @@ int main(int argc, char *argv[])
 			} else {
 				assert(*evptr == EV_MAGIC_CLIENT || *evptr == EV_MAGIC_SERVER);
 			}
-			
+
 			/**
 			 * NOTICE:
 			 * - io_state = 0: no pending I/O, state machine can move forward
