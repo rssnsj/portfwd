@@ -28,10 +28,6 @@ typedef int bool;
 
 #define countof(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-#define container_of(ptr, type, member) ({			\
-	const typeof(((type *)0)->member) * __mptr = (ptr);	\
-	(type *)((char *)__mptr - offsetof(type, member)); })
-
 struct sockaddr_inx {
 	union {
 		struct sockaddr sa;
@@ -49,8 +45,11 @@ struct sockaddr_inx {
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
-#include <sys/types.h>
 #include <stddef.h>
+
+#define container_of(ptr, type, member) ({			\
+	const typeof(((type *)0)->member) * __mptr = (ptr);	\
+	(type *)((char *)__mptr - offsetof(type, member)); })
 
 /*
  * These are non-NULL pointers that will result in page faults
@@ -84,18 +83,6 @@ static inline void INIT_LIST_HEAD(struct list_head *list)
 	list->next = list;
 	list->prev = list;
 }
-
-/* ------------------------------------------------------- */
-static inline void init_list_entry(struct list_head *entry)
-{
-	entry->next = LIST_POISON1;
-	entry->prev = LIST_POISON2;
-}
-static inline int list_entry_orphan(struct list_head *entry)
-{
-	return entry->next == LIST_POISON1;
-}
-/* ------------------------------------------------------- */
 
 /*
  * Insert a new entry between two known consecutive entries.
@@ -195,6 +182,14 @@ static inline int list_empty(const struct list_head *head)
 	list_entry((ptr)->next, type, member)
 
 /**
+ * list_next_entry - get the next element in list
+ * @pos:	the type * to cursor
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_next_entry(pos, member) \
+	list_entry((pos)->member.next, typeof(*(pos)), member)
+
+/**
  * list_for_each_entry	-	iterate over list of given type
  * @pos:	the type * to use as a loop cursor.
  * @head:	the head for your list.
@@ -205,281 +200,30 @@ static inline int list_empty(const struct list_head *head)
 	     /*prefetch(pos->member.next),*/ &pos->member != (head); 	\
 	     pos = list_entry(pos->member.next, typeof(*pos), member))
 
+/**
+ * list_for_each_entry_safe - iterate over list of given type safe against removal of list entry
+ * @pos:	the type * to use as a loop cursor.
+ * @n:		another type * to use as temporary storage
+ * @head:	the head for your list.
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_for_each_entry_safe(pos, n, head, member)			\
+	for (pos = list_first_entry(head, typeof(*pos), member),	\
+		n = list_next_entry(pos, member);			\
+	     &pos->member != (head); 					\
+	     pos = n, n = list_next_entry(n, member))
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
-
-/* Vector hash entry (for caches). */
-struct h_cache {
-	struct list_head list;
-	struct h_bucket *bucket;
-	struct h_table *table;
-	struct list_head idle_list;
-	/* Time for the latest `h_entry_put()` operation. */
-	time_t last_put;
-	int refs;
-};
-
-struct h_bucket {
-	struct list_head chain;
-};
-
-enum __h_table_type {
-	H_TABLE_TYPE_CACHE,
-};
-
-struct h_table {
-	int table_type;
-	union {
-		struct h_operations *ops;
-	};
-	struct h_bucket *base;
-	bool      static_base;
-	size_t    size;
-	size_t    max_len;
-	size_t    len;
-	long      timeo;
-	struct list_head idle_queue;
-};
-
-/* Hash table operation collections. */
-struct h_operations {
-	unsigned int (*hash)(void *key);
-	int   (*comp_key)(struct h_cache *he, void *key);
-	void  (*release)(struct h_cache *he);
-	char *(*build_line)(struct h_cache *he);
-	int   (*operate_cmd)(struct h_table *ht, const char *cmd);
-};
-
-/* Exported operations. */
-
-static inline int h_table_len(struct h_table *ht)
-{
-	return ht->len;
-}
-
-static inline size_t h_table_len_inc(struct h_table *ht)
-{
-	size_t len = ++ht->len;
-	return len;
-}
-
-static inline size_t h_table_len_dec(struct h_table *ht)
-{
-	size_t len = --ht->len;
-	return len;
-}
-
-static struct h_cache *__h_cache_try_get(struct h_table *ht, void *key,
-		struct h_cache *(*create)(struct h_table *, void *),
-		void (*modify)(struct h_cache *, void *) )
-{
-	struct h_bucket *b = &ht->base[ht->ops->hash(key) & (ht->size - 1)];
-	struct h_cache *he;
-	
-	list_for_each_entry(he, &b->chain, list) {
-		if (ht->ops->comp_key(he, key) == 0) {
-			/* Pop-up from idle queue when reference leaves 0. */
-			if (++he->refs == 1) {
-				if (!list_entry_orphan(&he->idle_list))
-					list_del(&he->idle_list);
-			}
-			/* Invoke the call back to do modifications. */
-			if (modify)
-				modify(he, key);
-			return he;
-		}
-	}
-	
-	/* Not found, try to create a new entry. */
-	if (create == NULL) {
-		return NULL;
-	}
-	
-	/* If the table is full, try to recycle idle entries. */
-	if (h_table_len(ht) >= ht->max_len) {
-		syslog(LOG_ERR, "-- ht->len: %d, ht->max_len: %d\n", (int)ht->len, (int)ht->max_len);
-		return NULL;
-	}
-	
-	if ((he = create(ht, key)) == NULL) {
-		return NULL;
-	}
-	/* Initialize the base class. */
-	he->bucket = b;
-	he->table = ht;
-	init_list_entry(&he->list);
-	//init_timer(&he->timer);
-	init_list_entry(&he->idle_list);
-	he->last_put = 0;
-	he->refs = 1;
-	list_add(&he->list, &b->chain);
-	
-	h_table_len_inc(ht);
-	
-	return he;
-}
-
-static inline struct h_cache *h_entry_try_get(struct h_table *ht, void *key,
-		struct h_cache *(*create)(struct h_table *, void *),
-		void (*modify)(struct h_cache *, void *) )
-{
-	return __h_cache_try_get(ht, key, create, modify);
-}
-
-static void h_entry_put(struct h_cache *he)
-{
-	struct h_table *ht = he->table;
-	
-	if (--he->refs == 0) {
-		/* Push unused entry to TAIL of the idle queue. */
-		if (list_entry_orphan(&he->idle_list)) {
-			/* Timer will check this to determine when it should be removed. */
-			he->last_put = time(NULL);
-			list_add_tail(&he->idle_list, &ht->idle_queue);
-		} else {
-			syslog(LOG_ERR, "%s(): entry(0x%08lx) is already in idle queue!\n",
-				__FUNCTION__, (unsigned long)he);
-		}
-	}
-}
-
-static int h_table_clear(struct h_table *ht)
-{
-	int count = 0;
-	struct h_cache *he;
-	
-	while (!list_empty(&ht->idle_queue)) {
-		he = list_first_entry(&ht->idle_queue, struct h_cache, idle_list);
-
-		list_del(&he->idle_list);
-		list_del(&he->list);
-
-		ht->ops->release(he);
-		h_table_len_dec(ht);
-
-		count++;
-	}
-
-	return count;
-}
-
-static int h_table_release(struct h_table *ht)
-{
-	size_t ht_len = ht->len;
-	
-	if (ht->base) {
-		if (h_table_clear(ht) != ht_len)
-			return -EFAULT;
-		if (!ht->static_base)
-			free(ht->base);
-		ht->base = NULL;
-	}
-	ht->size = 0;
-	
-	return 0;
-}
-
-static void __h_table_timeo_check(struct h_table *ht)
-{
-	struct h_cache *he;
-	time_t current_ts = time(NULL);
-
-	while (!list_empty(&ht->idle_queue)) {
-		he = list_first_entry(&ht->idle_queue, struct h_cache, idle_list);
-
-		if ((current_ts - he->last_put <= ht->timeo) &&
-			(h_table_len(ht) < ht->max_len * 9 / 10) )
-			break;
-
-		list_del(&he->idle_list);
-		list_del(&he->list);
-
-		ht->ops->release(he);
-		h_table_len_dec(ht);
-	} /* while(!list_empty(&ht->idle_queue)) */
-	
-	printf("Live entries: %d\n", (int)ht->len);
-}
-
-/*
- * h_table_create: Initialize a new hash table.
- * Parameters: 
- *  @ht: `h_table` structure, already allocated or static,
- *  @base: optional argument, used for large sized hash table,
- *  @size: hash size,
- *  @max_len: maximum entries,
- *  @timeo: idle timeout secs.,
- *  @ops: operation collections for hash table.
- * return value:
-*   0 for success, <0 for error codes, use `errno` standards.
- */
-static int __h_table_create(struct h_table *ht, enum __h_table_type table_type,
-		struct h_bucket *base, size_t size, size_t max_len, long timeo,
-		struct h_operations *ops)
-{
-	struct h_bucket *b;
-	size_t __size;
-	int i;
-	
-	memset(ht, 0x0, sizeof(ht[0]));
-	
-	for (__size = size - 1, i = 0; __size; __size >>= 1, i++);
-	__size = (1UL << i);
-	if (size != __size) {
-		syslog(LOG_ERR, "%s() Warning: size '%lu' is accepted as '%lu'.\n",
-			__FUNCTION__, (unsigned long)size, (unsigned long)__size);
-		size = __size;
-	}
-	
-	if (base) {
-		ht->base = base;
-		ht->static_base = true;
-	} else {
-		if ((ht->base = (struct h_bucket *)malloc(sizeof(struct h_bucket) * size)) == NULL)
-			return -ENOMEM;
-		ht->static_base = false;
-	}
-	
-	for (i = 0; i < size; i++) {
-		b = &ht->base[i];
-		INIT_LIST_HEAD(&b->chain);
-	}
-	ht->size  = size;
-	ht->max_len = max_len;
-	ht->timeo = timeo;
-	ht->ops   = ops;
-	ht->len   = 0;
-	
-	/* Initialization for idle queue. */
-	INIT_LIST_HEAD(&ht->idle_queue);
-
-	switch (table_type) {
-	case H_TABLE_TYPE_CACHE:
-		ht->table_type = table_type;
-		break;
-	default:
-		syslog(LOG_ERR, "Invalid table type %d.\n", table_type);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static inline int h_table_create(struct h_table *ht,
-		struct h_bucket *base, size_t size, size_t max_len, long timeo,
-		struct h_operations *ops)
-{
-	return __h_table_create(ht, H_TABLE_TYPE_CACHE, base, size, max_len, timeo, ops);
-}
-
-/* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static struct sockaddr_inx g_src_addr;
 static struct sockaddr_inx g_dst_addr;
 static const char *g_pidfile;
-static struct h_table g_conn_tbl;
-static int g_lsn_sock = -1;
-static int g_epfd = -1;
+
+#define CONN_TBL_HASH_SIZE  (1 < 8)
+#define CONN_TBL_LIMIT_PER_WALK  (200)
+#define PROXY_SESSION_TIMEOUT  (60)
+static struct list_head conn_tbl_hbase[CONN_TBL_HASH_SIZE];
+static unsigned conn_tbl_len;
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
@@ -570,6 +314,28 @@ static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
 	return 0;
 }
 
+static bool is_sockaddr_inx_equal(struct sockaddr_inx *sa1, struct sockaddr_inx *sa2)
+{
+	if (sa1->sa.sa_family != sa2->sa.sa_family)
+		return false;
+
+	if (sa1->sa.sa_family == AF_INET) {
+		if (sa1->in.sin_addr.s_addr != sa2->in.sin_addr.s_addr)
+			return false;
+		if (sa1->in.sin_port != sa2->in.sin_port)
+			return false;
+		return true;
+	} else if (sa1->sa.sa_family == AF_INET6) {
+		if (memcmp(&sa1->in6.sin6_addr, &sa2->in6.sin6_addr, sizeof(sa2->in6.sin6_addr)))
+			return false;
+		if (sa1->in6.sin6_port != sa2->in6.sin6_port)
+			return false;
+		return true;
+	}
+
+	return true;
+}
+
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 /**
@@ -577,7 +343,7 @@ static int get_sockaddr_inx_pair(const char *pair, struct sockaddr_inx *sa)
  *  a proxy session.
  */
 struct proxy_conn {
-	struct h_cache h_cache;
+	struct list_head list;
 	time_t last_active;
 	int svr_sock;
 	/* Remember the session addresses */
@@ -585,105 +351,88 @@ struct proxy_conn {
 	struct sockaddr_inx svr_addr;
 };
 
-static inline void release_proxy_conn(struct proxy_conn *conn,
-		struct epoll_event *pending_evs, int pending_fds);
-static inline struct proxy_conn *alloc_proxy_conn(void);
-static struct proxy_conn *new_connection(int lsn_sock, int epfd,
-		struct sockaddr_inx *cli_addr);
-
-static unsigned int proxy_conn_hash_fn(void *key)
+static unsigned int proxy_conn_hash(struct sockaddr_inx *sa)
 {
-	struct sockaddr_inx *sa = key;
 	unsigned int hash = 0;
-	
+
 	if (sa->sa.sa_family == AF_INET) {
-		hash = ntohl(sa->in.sin_addr.s_addr) +
-			ntohs(sa->in.sin_port);
+		hash = ntohl(sa->in.sin_addr.s_addr) + ntohs(sa->in.sin_port);
 	} else if (sa->sa.sa_family == AF_INET6) {
 		int i;
 		for (i = 0; i < 4; i++)
 			hash += ((uint32_t *)&sa->in6.sin6_addr)[i];
 		hash += ntohs(sa->in6.sin6_port);
 	}
-	
+
 	return hash;
 }
 
-static int proxy_conn_key_cmp_fn(struct h_cache *he, void *key)
+static struct proxy_conn *__create_new_connection(
+		const struct sockaddr_inx *cli_addr, int epfd)
 {
-	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
-	struct sockaddr_inx *sa = key, *k = &conn->cli_addr;
+	int svr_sock = -1;
+	struct proxy_conn *conn;
+	struct epoll_event ev;
 
-	if (sa->sa.sa_family != k->sa.sa_family)
-		return 1;
-	
-	if (sa->sa.sa_family == AF_INET) {
-		if (sa->in.sin_addr.s_addr != k->in.sin_addr.s_addr)
-			return 1;
-		if (sa->in.sin_port != k->in.sin_port)
-			return 1;
-		return 0;
-	} else if (sa->sa.sa_family == AF_INET6) {
-		if (memcmp(&sa->in6.sin6_addr, &k->in6.sin6_addr, sizeof(k->in6.sin6_addr)))
-			return 1;
-		if (sa->in6.sin6_port != k->in6.sin6_port)
-			return 1;
-		return 0;
+	/* Initiate the connection to server right now. */
+	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
+		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
+		return NULL;
 	}
-	
-	return 0;
-}
-
-static void proxy_conn_release_fn(struct h_cache *he)
-{
-	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
-	release_proxy_conn(conn, NULL, 0);
-}
-
-static struct h_operations proxy_conn_hops = {
-	.hash        = proxy_conn_hash_fn,
-	.comp_key    = proxy_conn_key_cmp_fn,
-	.release     = proxy_conn_release_fn,
-};
-
-static struct h_cache *__proxy_conn_create_fn(struct h_table *ht, void *key)
-{
-	struct sockaddr_inx *cli_addr = key;
-	struct proxy_conn *conn;
-
-	if (!(conn = new_connection(g_lsn_sock, g_epfd, cli_addr)))
+	/* Connect to real server. */
+	if (connect(svr_sock, (struct sockaddr *)&g_dst_addr,
+			sizeof_sockaddr(&g_dst_addr)) != 0) {
+		/* Error occurs, drop the session. */
+		syslog(LOG_WARNING, "Connection failed: %s\n", strerror(errno));
+		close(svr_sock);
 		return NULL;
+	}
+	set_nonblock(svr_sock);
 
-	return &conn->h_cache;
-}
-
-static void __proxy_conn_modify_fn(struct h_cache *he, void *key)
-{
-	struct proxy_conn *conn = container_of(he, struct proxy_conn, h_cache);
-	conn->last_active = time(NULL);
-}
-
-
-/**
- * Get 'conn' structure by passing the ev.data.ptr
- * @ptr: cannot be NULL and must be either EV_MAGIC_CLIENT
- *  or EV_MAGIC_SERVER.
- */
-static inline struct proxy_conn *get_conn_by_evptr(int *evptr)
-{
-	return (struct proxy_conn *)evptr;
-}
-
-static inline struct proxy_conn *alloc_proxy_conn(void)
-{
-	struct proxy_conn *conn;
-
-	if (!(conn = malloc(sizeof(*conn))))
+	/* Allocate session data for the connection */
+	if ((conn = malloc(sizeof(*conn))) == NULL) {
+		syslog(LOG_ERR, "*** malloc(conn): %s\n", strerror(errno));
+		close(svr_sock);
 		return NULL;
+	}
 	memset(conn, 0x0, sizeof(*conn));
+	conn->svr_sock = svr_sock;
+	conn->cli_addr = *cli_addr;
+	conn->svr_addr = g_dst_addr;
 
-	conn->svr_sock = -1;
+	ev.data.ptr = conn;
+	ev.events = EPOLLIN;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
+
+	return conn;
+}
+
+static struct proxy_conn *proxy_conn_get_or_create(
+		struct sockaddr_inx *cli_addr, int epfd)
+{
+	struct list_head *chain = &conn_tbl_hbase[
+		proxy_conn_hash(cli_addr) & (CONN_TBL_HASH_SIZE - 1)];
+	struct proxy_conn *conn;
+	char s_addr[50] = "";
+
+	list_for_each_entry (conn, chain, list) {
+		if (is_sockaddr_inx_equal(cli_addr, &conn->cli_addr)) {
+			conn->last_active = time(NULL);
+			return conn;
+		}
+	}
+
+	if ((conn = __create_new_connection(cli_addr, epfd)) == NULL)
+		return NULL;
+
 	conn->last_active = time(NULL);
+	list_add_tail(&conn->list, chain);
+	conn_tbl_len++;
+
+	inet_ntop(cli_addr->sa.sa_family, addr_of_sockaddr(cli_addr),
+			s_addr, sizeof(s_addr));
+	syslog(LOG_INFO, "New connection [%s]:%d (%u)\n",
+			s_addr, ntohs(port_of_sockaddr(cli_addr)), conn_tbl_len);
 
 	return conn;
 }
@@ -692,93 +441,50 @@ static inline struct proxy_conn *alloc_proxy_conn(void)
  * Close both sockets of the connection and remove it
  *  from the current ready list.
  */
-static inline void release_proxy_conn(struct proxy_conn *conn,
-		struct epoll_event *pending_evs, int pending_fds)
+static void release_proxy_conn(struct proxy_conn *conn, int epfd)
 {
-	int i;
-
-	/**
-	 * Clear possible fd events that might belong to current
-	 *  connection. The event must be cleared or an invalid
-	 *  pointer might be accessed.
-	 */
-	for (i = 0; i < pending_fds; i++) {
-		struct epoll_event *ev = &pending_evs[i];
-		if (ev->data.ptr == conn) {
-			ev->data.ptr = NULL;
-			break;
-		}
-	}
-
-	if (conn->svr_sock >= 0)
-		close(conn->svr_sock);
-
+	list_del(&conn->list);
+	conn_tbl_len--;
+	epoll_ctl(epfd, EPOLL_CTL_DEL, conn->svr_sock, NULL);
+	close(conn->svr_sock);
 	free(conn);
 }
 
-static struct proxy_conn *new_connection(int lsn_sock, int epfd,
-		struct sockaddr_inx *cli_addr)
+static void proxy_conn_walk_continue(unsigned walk_max, int epfd)
 {
-	struct proxy_conn *conn;
-	int svr_sock;
+	static unsigned bucket_index = 0;
+	unsigned __bucket_index = bucket_index;
+	unsigned walk_count = 0;
+	time_t current_ts = time(NULL);
 
-	/* Client calls in, allocate session data for it. */
-	if (!(conn = alloc_proxy_conn())) {
-		syslog(LOG_ERR, "*** alloc_proxy_conn(): %s\n", strerror(errno));
-		return NULL;
-	}
-	conn->cli_addr = *cli_addr;
-	
-	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
-		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
-		/**
-		 * 'conn' has only been used among this function,
-		 *  so don't need the caller to release anything.
-		 */
-		release_proxy_conn(conn, NULL, 0);
-		return NULL;
-	}
-	conn->svr_sock = svr_sock;
-	set_nonblock(conn->svr_sock);
+	if (walk_max > conn_tbl_len)
+		walk_max = conn_tbl_len;
+	if (walk_max == 0)
+		return;
 
-	/* Connect to real server. */
-	conn->svr_addr = g_dst_addr;
-
-	if (connect(conn->svr_sock, (struct sockaddr *)&conn->svr_addr,
-			sizeof_sockaddr(&conn->svr_addr)) == 0) {
-		/* Connected, prepare for data forwarding. */
-		struct epoll_event ev;
-		ev.data.ptr = conn;
-		ev.events = EPOLLIN;
-		epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-		return conn;
-	} else {
-		/* Error occurs, drop the session. */
-		syslog(LOG_WARNING, "Connection failed: %s\n", strerror(errno));
-		release_proxy_conn(conn, NULL, 0);
-		return NULL;
-	}
-}
-
-static struct proxy_conn *get_conn_by_cli_addr(struct sockaddr_inx *cli_addr)
-{
-	struct h_cache *he;
-	
-	if (!(he = h_entry_try_get(&g_conn_tbl, cli_addr, __proxy_conn_create_fn,
-		__proxy_conn_modify_fn)))
-		return NULL;
-	/* Single threaded, don't have to hold it. */
-	h_entry_put(he);
-	
-	return container_of(he, struct proxy_conn, h_cache);
+	do {
+		struct proxy_conn *conn, *__conn;
+		list_for_each_entry_safe (conn, __conn, &conn_tbl_hbase[bucket_index], list) {
+			if ((unsigned)(current_ts - conn->last_active) > PROXY_SESSION_TIMEOUT) {
+				struct sockaddr_inx cli_addr = conn->cli_addr;
+				char s_addr[50] = "";
+				release_proxy_conn(conn, epfd);
+				inet_ntop(cli_addr.sa.sa_family, addr_of_sockaddr(&cli_addr),
+						s_addr, sizeof(s_addr));
+				syslog(LOG_INFO, "Connection [%s]:%d timed out (%u)\n",
+						s_addr, ntohs(port_of_sockaddr(&cli_addr)), conn_tbl_len);
+			}
+			walk_count++;
+		}
+		bucket_index = (bucket_index + 1) & (CONN_TBL_HASH_SIZE - 1);
+	} while (walk_count < walk_max && bucket_index != __bucket_index);
 }
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
 static void show_help(int argc, char *argv[])
 {
-	printf("User space UDP proxy.\n");
+	printf("Userspace UDP proxy.\n");
 	printf("Usage:\n");
 	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o]\n", argv[0]);
 	printf("Options:\n");
@@ -789,7 +495,7 @@ static void show_help(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-	int opt, b_true = 1, rc;
+	int opt, b_true = 1, lsn_sock, epfd, i;
 	bool is_daemon = false, is_v6only = false;
 	struct epoll_event ev, events[100];
 	char buffer[1024 * 64];
@@ -837,19 +543,19 @@ int main(int argc, char *argv[])
 
 	openlog("udpfwd", LOG_PID|LOG_PERROR|LOG_NDELAY, LOG_USER);
 
-	g_lsn_sock = socket(g_src_addr.sa.sa_family, SOCK_DGRAM, 0);
-	if (g_lsn_sock < 0) {
+	lsn_sock = socket(g_src_addr.sa.sa_family, SOCK_DGRAM, 0);
+	if (lsn_sock < 0) {
 		fprintf(stderr, "*** socket(): %s.\n", strerror(errno));
 		exit(1);
 	}
 	if (g_src_addr.sa.sa_family == AF_INET6 && is_v6only)
-		setsockopt(g_lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_true, sizeof(b_true));
-	if (bind(g_lsn_sock, (struct sockaddr *)&g_src_addr,
+		setsockopt(lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_true, sizeof(b_true));
+	if (bind(lsn_sock, (struct sockaddr *)&g_src_addr,
 			sizeof_sockaddr(&g_src_addr)) < 0) {
 		fprintf(stderr, "*** bind(): %s.\n", strerror(errno));
 		exit(1);
 	}
-	set_nonblock(g_lsn_sock);
+	set_nonblock(lsn_sock);
 
 	inet_ntop(g_src_addr.sa.sa_family, addr_of_sockaddr(&g_src_addr),
 			s_addr1, sizeof(s_addr1));
@@ -860,49 +566,41 @@ int main(int argc, char *argv[])
 			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
 	/* Create epoll table. */
-	if ((g_epfd = epoll_create(2048)) < 0) {
+	if ((epfd = epoll_create(2048)) < 0) {
 		syslog(LOG_ERR, "epoll_create(): %s\n", strerror(errno));
 		exit(1);
 	}
 
-	/* Run in background. */
 	if (is_daemon)
 		do_daemonize();
-
 	if (g_pidfile)
 		write_pidfile(g_pidfile);
 
-	/* Create session hash table. */
-	rc = h_table_create(&g_conn_tbl, NULL, 512, 2048, 60, &proxy_conn_hops);
-	if (rc < 0) {
-		fprintf(stderr, "*** h_table_create() failed.\n");
-		exit(1);
-	}
-
-	/**
-	 * Ignore PIPE signal, which is triggered when send() to
-	 * a half-closed socket which causes process to abort
-	 */
 	signal(SIGPIPE, SIG_IGN);
 
-	/* epoll loop */
-	ev.data.ptr = &g_lsn_sock;
-	ev.events = EPOLLIN;
-	epoll_ctl(g_epfd, EPOLL_CTL_ADD, g_lsn_sock, &ev);
+	/* Initialize the connection table */
+	for (i = 0; i < CONN_TBL_HASH_SIZE; i++)
+		INIT_LIST_HEAD(&conn_tbl_hbase[i]);
+	conn_tbl_len = 0;
 
 	last_check = time(NULL);
 
+	/* epoll loop */
+	ev.data.ptr = &lsn_sock;
+	ev.events = EPOLLIN;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, lsn_sock, &ev);
+
 	for (;;) {
-		int nfds, i;
+		int nfds;
 		time_t current_ts = time(NULL);
 
 		/* Timeout check and recycle */
-		if ((unsigned)(current_ts - last_check) >= 5) {
-			__h_table_timeo_check(&g_conn_tbl);
+		if ((unsigned)(current_ts - last_check) >= 2) {
+			proxy_conn_walk_continue(100, epfd);
 			last_check = current_ts;
 		}
 
-		nfds = epoll_wait(g_epfd, events, countof(events), 1000 * 1);
+		nfds = epoll_wait(epfd, events, countof(events), 1000 * 2);
 		if (nfds == 0)
 			continue;
 		if (nfds < 0) {
@@ -914,41 +612,36 @@ int main(int argc, char *argv[])
 
 		for (i = 0; i < nfds; i++) {
 			struct epoll_event *evp = &events[i];
-			int *evptr = (int *)evp->data.ptr;
+			int *evptr = (int *)evp->data.ptr, r;
 			struct proxy_conn *conn;
-			int rlen;
-			
-			if (evptr == NULL) {
-				/* 'evptr = NULL' indicates the socket is closed. */
+
+			/* 'evptr = NULL' indicates the socket is closed. */
+			if (evptr == NULL)
 				continue;
-			} else if (evptr == &g_lsn_sock) {
-				/* Data from client. */
+
+			if (evptr == &lsn_sock) {
+				/* Data from client */
 				struct sockaddr_inx cli_addr;
 				socklen_t cli_alen = sizeof(cli_addr);
-				if ((rlen = recvfrom(g_lsn_sock, buffer, sizeof(buffer), 0,
+				if ((r = recvfrom(lsn_sock, buffer, sizeof(buffer), 0,
 						(struct sockaddr *)&cli_addr, &cli_alen)) <= 0)
 					continue;
-				if (!(conn = get_conn_by_cli_addr(&cli_addr)))
+				if (!(conn = proxy_conn_get_or_create(&cli_addr, epfd)))
 					continue;
-				send(conn->svr_sock, buffer, (size_t)rlen, 0);
-				/* FIXME: Need to care 'rc'? */
+				(void)send(conn->svr_sock, buffer, r, 0);
 			} else {
-				/* Data from server. */
-				conn = get_conn_by_evptr(evptr);
-				if ((rlen = recv(conn->svr_sock, buffer, sizeof(buffer), 0))
-					<= 0) {
+				/* Data from server */
+				conn = (struct proxy_conn *)evptr;
+				if ((r = recv(conn->svr_sock, buffer, sizeof(buffer), 0)) <= 0) {
 					/* Close the session. */
-					release_proxy_conn(conn, events + i + 1, nfds - 1 - i);
+					release_proxy_conn(conn, epfd);
 					continue;
 				}
-				sendto(g_lsn_sock, buffer, rlen, 0, (struct sockaddr *)&conn->cli_addr,
+				(void)sendto(lsn_sock, buffer, r, 0, (struct sockaddr *)&conn->cli_addr,
 						sizeof_sockaddr(&conn->cli_addr));
-				/* FIXME: Need to care 'rc'? */
 			}
 		}
 	}
-
-	h_table_release(&g_conn_tbl);
 
 	return 0;
 }
