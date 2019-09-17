@@ -51,23 +51,8 @@ struct sockaddr_inx {
 	const typeof(((type *)0)->member) * __mptr = (ptr);	\
 	(type *)((char *)__mptr - offsetof(type, member)); })
 
-/*
- * These are non-NULL pointers that will result in page faults
- * under normal circumstances, used to verify that nobody uses
- * non-initialized list entries.
- */
 #define LIST_POISON1  ((void *) 0x00100100)
 #define LIST_POISON2  ((void *) 0x00200200)
-
-/*
- * Simple doubly linked list implementation.
- *
- * Some of the internal functions ("__xxx") are useful when
- * manipulating whole lists rather than single entries, as
- * sometimes we already know the next/prev entries and we can
- * generate better code by using them directly rather than
- * using the generic single-entry routines.
- */
 
 struct list_head {
 	struct list_head *next, *prev;
@@ -84,12 +69,6 @@ static inline void INIT_LIST_HEAD(struct list_head *list)
 	list->prev = list;
 }
 
-/*
- * Insert a new entry between two known consecutive entries.
- *
- * This is only for internal list manipulation where we know
- * the prev/next entries already!
- */
 static inline void __list_add(struct list_head *new,
 			      struct list_head *prev,
 			      struct list_head *next)
@@ -100,51 +79,22 @@ static inline void __list_add(struct list_head *new,
 	prev->next = new;
 }
 
-/**
- * list_add - add a new entry
- * @new: new entry to be added
- * @head: list head to add it after
- *
- * Insert a new entry after the specified head.
- * This is good for implementing stacks.
- */
 static inline void list_add(struct list_head *new, struct list_head *head)
 {
 	__list_add(new, head, head->next);
 }
 
-/**
- * list_add_tail - add a new entry
- * @new: new entry to be added
- * @head: list head to add it before
- *
- * Insert a new entry before the specified head.
- * This is useful for implementing queues.
- */
 static inline void list_add_tail(struct list_head *new, struct list_head *head)
 {
 	__list_add(new, head->prev, head);
 }
 
-/*
- * Delete a list entry by making the prev/next entries
- * point to each other.
- *
- * This is only for internal list manipulation where we know
- * the prev/next entries already!
- */
 static inline void __list_del(struct list_head * prev, struct list_head * next)
 {
 	next->prev = prev;
 	prev->next = next;
 }
 
-/**
- * list_del - deletes entry from list.
- * @entry: the element to delete from the list.
- * Note: list_empty() on entry does not return true after this, the entry is
- * in an undefined state.
- */
 static inline void list_del(struct list_head *entry)
 {
 	__list_del(entry->prev, entry->next);
@@ -152,61 +102,25 @@ static inline void list_del(struct list_head *entry)
 	entry->prev = LIST_POISON2;
 }
 
-/**
- * list_empty - tests whether a list is empty
- * @head: the list to test.
- */
 static inline int list_empty(const struct list_head *head)
 {
 	return head->next == head;
 }
 
-/**
- * list_entry - get the struct for this entry
- * @ptr:	the &struct list_head pointer.
- * @type:	the type of the struct this is embedded in.
- * @member:	the name of the list_struct within the struct.
- */
 #define list_entry(ptr, type, member) \
 	container_of(ptr, type, member)
 
-/**
- * list_first_entry - get the first element from a list
- * @ptr:	the list head to take the element from.
- * @type:	the type of the struct this is embedded in.
- * @member:	the name of the list_struct within the struct.
- *
- * Note, that list is expected to be not empty.
- */
 #define list_first_entry(ptr, type, member) \
 	list_entry((ptr)->next, type, member)
 
-/**
- * list_next_entry - get the next element in list
- * @pos:	the type * to cursor
- * @member:	the name of the list_struct within the struct.
- */
 #define list_next_entry(pos, member) \
 	list_entry((pos)->member.next, typeof(*(pos)), member)
 
-/**
- * list_for_each_entry	-	iterate over list of given type
- * @pos:	the type * to use as a loop cursor.
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- */
 #define list_for_each_entry(pos, head, member)				\
 	for (pos = list_entry((head)->next, typeof(*pos), member);	\
 	     /*prefetch(pos->member.next),*/ &pos->member != (head); 	\
 	     pos = list_entry(pos->member.next, typeof(*pos), member))
 
-/**
- * list_for_each_entry_safe - iterate over list of given type safe against removal of list entry
- * @pos:	the type * to use as a loop cursor.
- * @n:		another type * to use as temporary storage
- * @head:	the head for your list.
- * @member:	the name of the list_struct within the struct.
- */
 #define list_for_each_entry_safe(pos, n, head, member)			\
 	for (pos = list_first_entry(head, typeof(*pos), member),	\
 		n = list_next_entry(pos, member);			\
@@ -220,10 +134,9 @@ static struct sockaddr_inx g_dst_addr;
 static const char *g_pidfile;
 
 #define CONN_TBL_HASH_SIZE  (1 < 8)
-#define CONN_TBL_LIMIT_PER_WALK  (200)
-#define PROXY_SESSION_TIMEOUT  (60)
 static struct list_head conn_tbl_hbase[CONN_TBL_HASH_SIZE];
 static unsigned conn_tbl_len;
+static unsigned proxy_conn_timeo = 60;
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- */
 
@@ -345,10 +258,8 @@ static bool is_sockaddr_inx_equal(struct sockaddr_inx *sa1, struct sockaddr_inx 
 struct proxy_conn {
 	struct list_head list;
 	time_t last_active;
+	struct sockaddr_inx cli_addr;  /* <-- key */
 	int svr_sock;
-	/* Remember the session addresses */
-	struct sockaddr_inx cli_addr;
-	struct sockaddr_inx svr_addr;
 };
 
 static unsigned int proxy_conn_hash(struct sockaddr_inx *sa)
@@ -367,52 +278,14 @@ static unsigned int proxy_conn_hash(struct sockaddr_inx *sa)
 	return hash;
 }
 
-static struct proxy_conn *__create_new_connection(
-		const struct sockaddr_inx *cli_addr, int epfd)
-{
-	int svr_sock = -1;
-	struct proxy_conn *conn;
-	struct epoll_event ev;
-
-	/* Initiate the connection to server right now. */
-	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
-		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
-		return NULL;
-	}
-	/* Connect to real server. */
-	if (connect(svr_sock, (struct sockaddr *)&g_dst_addr,
-			sizeof_sockaddr(&g_dst_addr)) != 0) {
-		/* Error occurs, drop the session. */
-		syslog(LOG_WARNING, "Connection failed: %s\n", strerror(errno));
-		close(svr_sock);
-		return NULL;
-	}
-	set_nonblock(svr_sock);
-
-	/* Allocate session data for the connection */
-	if ((conn = malloc(sizeof(*conn))) == NULL) {
-		syslog(LOG_ERR, "*** malloc(conn): %s\n", strerror(errno));
-		close(svr_sock);
-		return NULL;
-	}
-	memset(conn, 0x0, sizeof(*conn));
-	conn->svr_sock = svr_sock;
-	conn->cli_addr = *cli_addr;
-	conn->svr_addr = g_dst_addr;
-
-	ev.data.ptr = conn;
-	ev.events = EPOLLIN;
-	epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
-
-	return conn;
-}
-
 static struct proxy_conn *proxy_conn_get_or_create(
 		struct sockaddr_inx *cli_addr, int epfd)
 {
 	struct list_head *chain = &conn_tbl_hbase[
 		proxy_conn_hash(cli_addr) & (CONN_TBL_HASH_SIZE - 1)];
 	struct proxy_conn *conn;
+	int svr_sock = -1;
+	struct epoll_event ev;
 	char s_addr[50] = "";
 
 	list_for_each_entry (conn, chain, list) {
@@ -422,24 +295,55 @@ static struct proxy_conn *proxy_conn_get_or_create(
 		}
 	}
 
-	if ((conn = __create_new_connection(cli_addr, epfd)) == NULL)
-		return NULL;
+	/* ------------------------------------------ */
+	/* Establish the server-side connection */
+	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
+		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
+		goto err;
+	}
+	/* Connect to real server. */
+	if (connect(svr_sock, (struct sockaddr *)&g_dst_addr,
+			sizeof_sockaddr(&g_dst_addr)) != 0) {
+		/* Error occurs, drop the session. */
+		syslog(LOG_WARNING, "Connection failed: %s\n", strerror(errno));
+		goto err;
+	}
+	set_nonblock(svr_sock);
 
-	conn->last_active = time(NULL);
+	/* Allocate session data for the connection */
+	if ((conn = malloc(sizeof(*conn))) == NULL) {
+		syslog(LOG_ERR, "*** malloc(conn): %s\n", strerror(errno));
+		goto err;
+	}
+	memset(conn, 0x0, sizeof(*conn));
+	conn->svr_sock = svr_sock;
+	conn->cli_addr = *cli_addr;
+
+	ev.data.ptr = conn;
+	ev.events = EPOLLIN;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, conn->svr_sock, &ev);
+	/* ------------------------------------------ */
+
 	list_add_tail(&conn->list, chain);
 	conn_tbl_len++;
 
 	inet_ntop(cli_addr->sa.sa_family, addr_of_sockaddr(cli_addr),
 			s_addr, sizeof(s_addr));
-	syslog(LOG_INFO, "New connection [%s]:%d (%u)\n",
+	syslog(LOG_INFO, "New connection %s:%d [%u]\n",
 			s_addr, ntohs(port_of_sockaddr(cli_addr)), conn_tbl_len);
 
+	conn->last_active = time(NULL);
 	return conn;
+
+err:
+	if (svr_sock >= 0)
+		close(svr_sock);
+	return NULL;
 }
 
 /**
  * Close both sockets of the connection and remove it
- *  from the current ready list.
+ * from the current ready list.
  */
 static void release_proxy_conn(struct proxy_conn *conn, int epfd)
 {
@@ -465,14 +369,14 @@ static void proxy_conn_walk_continue(unsigned walk_max, int epfd)
 	do {
 		struct proxy_conn *conn, *__conn;
 		list_for_each_entry_safe (conn, __conn, &conn_tbl_hbase[bucket_index], list) {
-			if ((unsigned)(current_ts - conn->last_active) > PROXY_SESSION_TIMEOUT) {
-				struct sockaddr_inx cli_addr = conn->cli_addr;
+			if ((unsigned)(current_ts - conn->last_active) > proxy_conn_timeo) {
+				struct sockaddr_inx addr = conn->cli_addr;
 				char s_addr[50] = "";
 				release_proxy_conn(conn, epfd);
-				inet_ntop(cli_addr.sa.sa_family, addr_of_sockaddr(&cli_addr),
+				inet_ntop(addr.sa.sa_family, addr_of_sockaddr(&addr),
 						s_addr, sizeof(s_addr));
-				syslog(LOG_INFO, "Connection [%s]:%d timed out (%u)\n",
-						s_addr, ntohs(port_of_sockaddr(&cli_addr)), conn_tbl_len);
+				syslog(LOG_INFO, "Recycled %s:%d [%u]\n",
+						s_addr, ntohs(port_of_sockaddr(&addr)), conn_tbl_len);
 			}
 			walk_count++;
 		}
@@ -488,6 +392,7 @@ static void show_help(int argc, char *argv[])
 	printf("Usage:\n");
 	printf("  %s <local_ip:local_port> <dest_ip:dest_port> [-d] [-o]\n", argv[0]);
 	printf("Options:\n");
+	printf("  -t <seconds>    proxy session timeout (default: %u)\n", proxy_conn_timeo);
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
 	printf("  -p <pidfile>    write PID to file\n");
@@ -498,12 +403,14 @@ int main(int argc, char *argv[])
 	int opt, b_true = 1, lsn_sock, epfd, i;
 	bool is_daemon = false, is_v6only = false;
 	struct epoll_event ev, events[100];
-	char buffer[1024 * 64];
+	char buffer[1024 * 64], s_addr1[50] = "", s_addr2[50] = "";
 	time_t last_check;
-	char s_addr1[50] = "", s_addr2[50] = "";
 
-	while ((opt = getopt(argc, argv, "dhop:")) != -1) {
+	while ((opt = getopt(argc, argv, "t:dhop:")) != -1) {
 		switch (opt) {
+		case 't':
+			proxy_conn_timeo = strtoul(optarg, NULL, 10);
+			break;
 		case 'd':
 			is_daemon = true;
 			break;
@@ -596,7 +503,7 @@ int main(int argc, char *argv[])
 
 		/* Timeout check and recycle */
 		if ((unsigned)(current_ts - last_check) >= 2) {
-			proxy_conn_walk_continue(100, epfd);
+			proxy_conn_walk_continue(200, epfd);
 			last_check = current_ts;
 		}
 
