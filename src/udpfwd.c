@@ -493,7 +493,7 @@ int main(int argc, char *argv[])
 	last_check = time(NULL);
 
 	/* epoll loop */
-	ev.data.ptr = &lsn_sock;
+	ev.data.ptr = NULL;
 	ev.events = EPOLLIN;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, lsn_sock, &ev);
 
@@ -519,14 +519,10 @@ int main(int argc, char *argv[])
 
 		for (i = 0; i < nfds; i++) {
 			struct epoll_event *evp = &events[i];
-			int *evptr = (int *)evp->data.ptr, r;
 			struct proxy_conn *conn;
+			int r;
 
-			/* 'evptr = NULL' indicates the socket is closed. */
-			if (evptr == NULL)
-				continue;
-
-			if (evptr == &lsn_sock) {
+			if (evp->data.ptr == NULL) {
 				/* Data from client */
 				struct sockaddr_inx cli_addr;
 				socklen_t cli_alen = sizeof(cli_addr);
@@ -538,7 +534,7 @@ int main(int argc, char *argv[])
 				(void)send(conn->svr_sock, buffer, r, 0);
 			} else {
 				/* Data from server */
-				conn = (struct proxy_conn *)evptr;
+				conn = (struct proxy_conn *)evp->data.ptr;
 				if ((r = recv(conn->svr_sock, buffer, sizeof(buffer), 0)) <= 0) {
 					/* Close the session. */
 					release_proxy_conn(conn, epfd);
