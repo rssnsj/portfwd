@@ -448,7 +448,7 @@ int main(int argc, char *argv[])
 	}
 	optind++;
 
-	openlog("udpfwd", LOG_PID|LOG_PERROR|LOG_NDELAY, LOG_USER);
+	openlog("udpfwd", LOG_PERROR|LOG_NDELAY, LOG_USER);
 
 	lsn_sock = socket(g_src_addr.sa.sa_family, SOCK_DGRAM, 0);
 	if (lsn_sock < 0) {

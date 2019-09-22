@@ -567,7 +567,7 @@ int main(int argc, char *argv[])
 	}
 	optind++;
 
-	openlog("tcpfwd", LOG_PID|LOG_PERROR|LOG_NDELAY, LOG_USER);
+	openlog("tcpfwd", LOG_PERROR|LOG_NDELAY, LOG_USER);
 
 	lsn_sock = socket(g_src_addr.sa.sa_family, SOCK_STREAM, 0);
 	if (lsn_sock < 0) {
