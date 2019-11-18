@@ -313,13 +313,13 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 	cli_sock = accept(sockfd, (struct sockaddr *)&cli_addr, &cli_alen);
 	if (cli_sock < 0) {
 		/* FIXME: error indicated, need to exit? */
-		syslog(LOG_ERR, "*** accept(): %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** accept(): %s", strerror(errno));
 		goto err;
 	}
 
 	/* Client calls in, allocate session data for it. */
 	if (!(conn = alloc_proxy_conn())) {
-		syslog(LOG_ERR, "*** alloc_proxy_conn(): %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** alloc_proxy_conn(): %s", strerror(errno));
 		close(cli_sock);
 		goto err;
 	}
@@ -340,11 +340,11 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 		memset(&loc_addr, 0x0, sizeof(loc_addr));
 		memset(&orig_dst, 0x0, sizeof(orig_dst));
 		if (getsockname(conn->cli_sock, (struct sockaddr *)&loc_addr, &loc_alen)) {
-			syslog(LOG_ERR, "*** getsockname(): %s.\n", strerror(errno));
+			syslog(LOG_ERR, "*** getsockname(): %s.", strerror(errno));
 			goto err;
 		}
 		if (getsockopt(conn->cli_sock, SOL_IP, SO_ORIGINAL_DST, &orig_dst, &orig_alen)) {
-			syslog(LOG_ERR, "*** getsockopt(SO_ORIGINAL_DST): %s.\n", strerror(errno));
+			syslog(LOG_ERR, "*** getsockopt(SO_ORIGINAL_DST): %s.", strerror(errno));
 			goto err;
 		}
 
@@ -363,13 +363,13 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 			s_addr1, sizeof(s_addr1));
 	inet_ntop(conn->svr_addr.sa.sa_family, addr_of_sockaddr(&conn->svr_addr),
 			s_addr2, sizeof(s_addr2));
-	syslog(LOG_INFO, "New connection [%s]:%d -> [%s]:%d\n",
+	syslog(LOG_INFO, "New connection [%s]:%d -> [%s]:%d",
 			s_addr1, ntohs(port_of_sockaddr(&conn->cli_addr)),
 			s_addr2, ntohs(port_of_sockaddr(&conn->svr_addr)));
 
 	/* Initiate the connection to server right now. */
 	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_STREAM, 0)) < 0) {
-		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** socket(svr_sock): %s", strerror(errno));
 		goto err;
 	}
 	conn->svr_sock = svr_sock;
@@ -388,7 +388,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 		return -EAGAIN;
 	} else {
 		/* Error occurs, drop the session. */
-		syslog(LOG_WARNING, "Connection to [%s]:%d failed: %s\n",
+		syslog(LOG_WARNING, "Connection to [%s]:%d failed: %s",
 				s_addr2, ntohs(port_of_sockaddr(&conn->svr_addr)),
 				strerror(errno));
 		goto err;
@@ -417,7 +417,7 @@ static int handle_server_connecting(struct proxy_conn *conn, int efd)
 		if (getsockopt(conn->svr_sock, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0 || err) {
 			inet_ntop(conn->svr_addr.sa.sa_family, addr_of_sockaddr(&conn->svr_addr),
 					s_addr, sizeof(s_addr));
-			syslog(LOG_WARNING, "Connection to [%s]:%d failed: %s\n",
+			syslog(LOG_WARNING, "Connection to [%s]:%d failed: %s",
 					s_addr, ntohs(port_of_sockaddr(&conn->svr_addr)),
 					strerror(err ? err : errno));
 			conn->state = S_CLOSING;
@@ -436,7 +436,7 @@ static int handle_server_connecting(struct proxy_conn *conn, int efd)
 				sizeof(rxb->data) - rxb->dlen, 0)) <= 0) {
 			inet_ntop(conn->cli_addr.sa.sa_family, addr_of_sockaddr(&conn->cli_addr),
 					s_addr, sizeof(s_addr));
-			syslog(LOG_INFO, "Connection [%s]:%d closed during server handshake\n",
+			syslog(LOG_INFO, "Connection [%s]:%d closed during server handshake",
 					s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
 			conn->state = S_CLOSING;
 			return 0;
@@ -498,7 +498,7 @@ static int handle_forwarding(struct proxy_conn *conn, int efd, int epfd,
 
 err:
 	inet_ntop(conn->cli_addr.sa.sa_family, addr_of_sockaddr(&conn->cli_addr), s_addr, sizeof(s_addr));
-	syslog(LOG_INFO, "Connection [%s]:%d closed\n", s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
+	syslog(LOG_INFO, "Connection [%s]:%d closed", s_addr, ntohs(port_of_sockaddr(&conn->cli_addr)));
 	conn->state = S_CLOSING;
 	return 0;
 }
@@ -592,13 +592,13 @@ int main(int argc, char *argv[])
 			s_addr1, sizeof(s_addr1));
 	inet_ntop(g_dst_addr.sa.sa_family, addr_of_sockaddr(&g_dst_addr),
 			s_addr2, sizeof(s_addr2));
-	syslog(LOG_INFO, "TCP proxy [%s]:%d -> [%s]:%d\n",
+	syslog(LOG_INFO, "TCP proxy [%s]:%d -> [%s]:%d",
 			s_addr1, ntohs(port_of_sockaddr(&g_src_addr)),
 			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
 	/* Create epoll table. */
 	if ((epfd = epoll_create(2048)) < 0) {
-		syslog(LOG_ERR, "epoll_create(): %s\n", strerror(errno));
+		syslog(LOG_ERR, "epoll_create(): %s", strerror(errno));
 		exit(1);
 	}
 
@@ -623,7 +623,7 @@ int main(int argc, char *argv[])
 		if (nfds < 0) {
 			if (errno == EINTR || errno == ERESTART)
 				continue;
-			syslog(LOG_ERR, "*** epoll_wait(): %s\n", strerror(errno));
+			syslog(LOG_ERR, "*** epoll_wait(): %s", strerror(errno));
 			exit(1);
 		}
 
@@ -672,7 +672,7 @@ int main(int argc, char *argv[])
 					io_state = handle_server_connected(conn, efd);
 					break;
 				default:
-					syslog(LOG_ERR, "*** Undefined state: %d\n", conn->state);
+					syslog(LOG_ERR, "*** Undefined state: %d", conn->state);
 					conn->state = S_CLOSING;
 					io_state = 0;
 				}

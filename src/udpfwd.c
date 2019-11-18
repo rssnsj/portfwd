@@ -298,21 +298,21 @@ static struct proxy_conn *proxy_conn_get_or_create(
 	/* ------------------------------------------ */
 	/* Establish the server-side connection */
 	if ((svr_sock = socket(g_dst_addr.sa.sa_family, SOCK_DGRAM, 0)) < 0) {
-		syslog(LOG_ERR, "*** socket(svr_sock): %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** socket(svr_sock): %s", strerror(errno));
 		goto err;
 	}
 	/* Connect to real server. */
 	if (connect(svr_sock, (struct sockaddr *)&g_dst_addr,
 			sizeof_sockaddr(&g_dst_addr)) != 0) {
 		/* Error occurs, drop the session. */
-		syslog(LOG_WARNING, "Connection failed: %s\n", strerror(errno));
+		syslog(LOG_WARNING, "Connection failed: %s", strerror(errno));
 		goto err;
 	}
 	set_nonblock(svr_sock);
 
 	/* Allocate session data for the connection */
 	if ((conn = malloc(sizeof(*conn))) == NULL) {
-		syslog(LOG_ERR, "*** malloc(conn): %s\n", strerror(errno));
+		syslog(LOG_ERR, "*** malloc(conn): %s", strerror(errno));
 		goto err;
 	}
 	memset(conn, 0x0, sizeof(*conn));
@@ -329,7 +329,7 @@ static struct proxy_conn *proxy_conn_get_or_create(
 
 	inet_ntop(cli_addr->sa.sa_family, addr_of_sockaddr(cli_addr),
 			s_addr, sizeof(s_addr));
-	syslog(LOG_INFO, "New connection %s:%d [%u]\n",
+	syslog(LOG_INFO, "New connection %s:%d [%u]",
 			s_addr, ntohs(port_of_sockaddr(cli_addr)), conn_tbl_len);
 
 	conn->last_active = time(NULL);
@@ -375,7 +375,7 @@ static void proxy_conn_walk_continue(unsigned walk_max, int epfd)
 				release_proxy_conn(conn, epfd);
 				inet_ntop(addr.sa.sa_family, addr_of_sockaddr(&addr),
 						s_addr, sizeof(s_addr));
-				syslog(LOG_INFO, "Recycled %s:%d [%u]\n",
+				syslog(LOG_INFO, "Recycled %s:%d [%u]",
 						s_addr, ntohs(port_of_sockaddr(&addr)), conn_tbl_len);
 			}
 			walk_count++;
@@ -468,13 +468,13 @@ int main(int argc, char *argv[])
 			s_addr1, sizeof(s_addr1));
 	inet_ntop(g_dst_addr.sa.sa_family, addr_of_sockaddr(&g_dst_addr),
 			s_addr2, sizeof(s_addr2));
-	syslog(LOG_INFO, "UDP proxy [%s]:%d -> [%s]:%d\n",
+	syslog(LOG_INFO, "UDP proxy [%s]:%d -> [%s]:%d",
 			s_addr1, ntohs(port_of_sockaddr(&g_src_addr)),
 			s_addr2, ntohs(port_of_sockaddr(&g_dst_addr)));
 
 	/* Create epoll table. */
 	if ((epfd = epoll_create(2048)) < 0) {
-		syslog(LOG_ERR, "epoll_create(): %s\n", strerror(errno));
+		syslog(LOG_ERR, "epoll_create(): %s", strerror(errno));
 		exit(1);
 	}
 
@@ -513,7 +513,7 @@ int main(int argc, char *argv[])
 		if (nfds < 0) {
 			if (errno == EINTR || errno == ERESTART)
 				continue;
-			syslog(LOG_ERR, "*** epoll_wait(): %s\n", strerror(errno));
+			syslog(LOG_ERR, "*** epoll_wait(): %s", strerror(errno));
 			exit(1);
 		}
 
