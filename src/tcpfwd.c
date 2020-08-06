@@ -22,7 +22,6 @@
 	#include "no-epoll.h"
 #endif
 
-typedef uint32_t __be32;
 typedef int bool;
 #define true 1
 #define false 0
@@ -335,7 +334,7 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 		struct sockaddr_inx loc_addr, orig_dst;
 		socklen_t loc_alen = sizeof(loc_addr), orig_alen = sizeof(orig_dst);
 		int port_offset = 0;
-		__be32 *addr_pos = NULL;
+		uint32_t *addr_pos = NULL; /* big-endian data */
 
 		memset(&loc_addr, 0x0, sizeof(loc_addr));
 		memset(&orig_dst, 0x0, sizeof(orig_dst));
@@ -349,9 +348,9 @@ static int handle_accept_new_connection(int sockfd, struct proxy_conn **conn_p)
 		}
 
 		if (conn->svr_addr.sa.sa_family == AF_INET) {
-			addr_pos = (__be32 *)&conn->svr_addr.in.sin_addr;
+			addr_pos = (uint32_t *)&conn->svr_addr.in.sin_addr;
 		} else {
-			addr_pos = (__be32 *)&conn->svr_addr.in6.sin6_addr.s6_addr32[3];
+			addr_pos = (uint32_t *)&conn->svr_addr.in6.sin6_addr.s6_addr32[3];
 		}
 		port_offset = (int)(ntohs(port_of_sockaddr(&orig_dst)) - ntohs(port_of_sockaddr(&loc_addr)));
 
