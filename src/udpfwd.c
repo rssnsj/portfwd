@@ -395,18 +395,19 @@ static void show_help(int argc, char *argv[])
 	printf("  -t <seconds>    proxy session timeout (default: %u)\n", proxy_conn_timeo);
 	printf("  -d              run in background\n");
 	printf("  -o              accept IPv6 connections only for IPv6 listener\n");
+	printf("  -r              set SO_REUSEADDR before binding local port\n");
 	printf("  -p <pidfile>    write PID to file\n");
 }
 
 int main(int argc, char *argv[])
 {
 	int opt, b_true = 1, lsn_sock, epfd, i;
-	bool is_daemon = false, is_v6only = false;
+	bool is_daemon = false, is_v6only = false, is_reuseaddr = false;
 	struct epoll_event ev, events[100];
 	char buffer[1024 * 64], s_addr1[50] = "", s_addr2[50] = "";
 	time_t last_check;
 
-	while ((opt = getopt(argc, argv, "t:dhop:")) != -1) {
+	while ((opt = getopt(argc, argv, "t:dhorp:")) != -1) {
 		switch (opt) {
 		case 't':
 			proxy_conn_timeo = strtoul(optarg, NULL, 10);
@@ -420,6 +421,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'o':
 			is_v6only = true;
+			break;
+		case 'r':
+			is_reuseaddr = true;
 			break;
 		case 'p':
 			g_pidfile = optarg;
@@ -455,6 +459,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "*** socket(): %s.\n", strerror(errno));
 		exit(1);
 	}
+	if (is_reuseaddr)
+		setsockopt(lsn_sock, SOL_SOCKET, SO_REUSEADDR, &b_true, sizeof(b_true));
 	if (g_src_addr.sa.sa_family == AF_INET6 && is_v6only)
 		setsockopt(lsn_sock, IPPROTO_IPV6, IPV6_V6ONLY, &b_true, sizeof(b_true));
 	if (bind(lsn_sock, (struct sockaddr *)&g_src_addr,
